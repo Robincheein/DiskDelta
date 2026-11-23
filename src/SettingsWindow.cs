@@ -26,6 +26,10 @@ namespace DiskDelta
         };
         private readonly Button save = MaintenanceView.Action("保存计划", true);
         private readonly Label planStatus = MaintenanceView.Note("");
+        private readonly Button increaseColor = MaintenanceView.Action("+ 增长颜色");
+        private readonly Button decreaseColor = MaintenanceView.Action("− 减少颜色");
+        private readonly Label colorStatus = MaintenanceView.Note("");
+        private ChangePalette palette;
         private readonly UpdateView update;
         private bool updatingGeneral;
         private bool planReady;
@@ -33,7 +37,8 @@ namespace DiskDelta
         private int planRequest;
 
         public SettingsWindow(Font font, string dataPath, string executable, IEnumerable<Volume> volumes,
-            Volume currentDisk, bool trayEnabled, Action<bool> setTray, GitHubUpdates updates, Func<bool> canInstall)
+            Volume currentDisk, bool trayEnabled, Action<bool> setTray, GitHubUpdates updates, Func<bool> canInstall,
+            ChangePalette palette, Action<ChangePalette> setPalette)
         {
             this.dataPath = dataPath;
             this.executable = executable;
@@ -41,7 +46,8 @@ namespace DiskDelta
             Text = "设置";
             Font = font;
             BackColor = Color.White;
-            ClientSize = new Size(465, 445);
+            ClientSize = new Size(465, 524);
+            AutoScroll = true;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition = FormStartPosition.CenterParent;
             MinimizeBox = MaximizeBox = ShowInTaskbar = false;
@@ -49,7 +55,9 @@ namespace DiskDelta
             AutoScaleDimensions = new SizeF(96, 96);
             AutoScaleMode = AutoScaleMode.Dpi;
 
-            var layout = MaintenanceView.Layout(110, 146, 143, 0);
+            var layout = MaintenanceView.Layout(110, 146, 79, 143, 46);
+            layout.Dock = DockStyle.Top;
+            layout.Height = 524;
             layout.Padding = new Padding(13, 7, 13, 8);
             Controls.Add(layout);
             var generalLayout = MaintenanceView.Layout(25, 25, 29);
@@ -69,15 +77,27 @@ namespace DiskDelta
             scheduleLayout.Controls.Add(MaintenanceView.Actions(daily, time), 0, 1);
             scheduleLayout.Controls.Add(StatusRow(planStatus, save), 0, 2);
             layout.Controls.Add(Section("扫描计划", scheduleLayout), 0, 1);
+
+            this.palette = palette;
+            var appearance = MaintenanceView.Layout(34, 20);
+            var resetColors = MaintenanceView.Action("恢复默认");
+            appearance.Controls.Add(MaintenanceView.Actions(increaseColor, decreaseColor, resetColors), 0, 0);
+            appearance.Controls.Add(colorStatus, 0, 1);
+            layout.Controls.Add(Section("变化颜色", appearance), 0, 2);
+            PreviewPalette();
+            increaseColor.Click += delegate { PickColor(true, setPalette); };
+            decreaseColor.Click += delegate { PickColor(false, setPalette); };
+            resetColors.Click += delegate { ChangeColors(ChangePalette.Default, setPalette); };
+
             update = new UpdateView(updates, executable, () => !saving && canInstall());
-            layout.Controls.Add(Section("版本更新", update), 0, 2);
+            layout.Controls.Add(Section("版本更新", update), 0, 3);
             update.InstallReady += delegate { DialogResult = DialogResult.Retry; Close(); };
 
             var close = MaintenanceView.Action("关闭");
             close.DialogResult = DialogResult.Cancel;
             close.Anchor = AnchorStyles.Right | AnchorStyles.Top;
             CancelButton = close;
-            layout.Controls.Add(close, 0, 3);
+            layout.Controls.Add(close, 0, 4);
 
             tray.Checked = trayEnabled;
             tray.CheckedChanged += delegate { ChangeGeneral(tray, setTray); };
@@ -100,6 +120,35 @@ namespace DiskDelta
                 if ((saving || update.Busy) && e.CloseReason == CloseReason.UserClosing) e.Cancel = true;
             };
             ResumeLayout(true);
+        }
+
+        private void PreviewPalette()
+        {
+            palette.Preview(increaseColor, true);
+            palette.Preview(decreaseColor, false);
+        }
+
+        private void PickColor(bool increase, Action<ChangePalette> setPalette)
+        {
+            using (var picker = new ColorDialog { FullOpen = true, Color = increase ? palette.Increase : palette.Decrease })
+            {
+                if (picker.ShowDialog(this) != DialogResult.OK) return;
+                ChangeColors(increase ? new ChangePalette(picker.Color, palette.Decrease) :
+                    new ChangePalette(palette.Increase, picker.Color), setPalette);
+            }
+        }
+
+        private void ChangeColors(ChangePalette colors, Action<ChangePalette> setPalette)
+        {
+            try
+            {
+                colors.Save(dataPath);
+                palette = colors;
+                PreviewPalette();
+                setPalette(colors);
+                colorStatus.Text = "已保存";
+            }
+            catch (Exception ex) { colorStatus.Text = ex.Message; }
         }
 
         private static GroupBox Section(string title, Control content)

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
@@ -19,7 +20,6 @@ namespace DiskDelta
         private static readonly Color Line = Color.FromArgb(222, 232, 236);
         private static readonly Color Accent = Color.FromArgb(0, 104, 92);
         private static readonly Color Pale = Color.FromArgb(225, 244, 238);
-        private static readonly Color Rise = Color.FromArgb(162, 73, 34);
         private const int BaseDpi = 96;
         private const int GridRowHeight = 25;
         private const int GridHeaderHeight = 29;
@@ -33,6 +33,7 @@ namespace DiskDelta
         private readonly ToolTip tips = new ToolTip();
         private readonly Button scanButton = Button("立即扫描", true);
         private readonly Button settings = Button("设置", false);
+        private readonly Button toolbarSettings = Button("设置", false);
         private readonly Label period = Label("", 9, Muted);
         private readonly Label state = Label("", 9, Muted);
         private readonly ProgressBar progressBar = new ProgressBar();
@@ -77,11 +78,17 @@ namespace DiskDelta
         private string rebuildPending;
         private string rebuildHint;
         private readonly List<DirectoryTree.Node> folderRows = new List<DirectoryTree.Node>();
+        private ChangePalette palette;
+        private int folderSortColumn = 3;
+        private SortOrder folderSortOrder = SortOrder.Descending;
+        private int fileSortColumn = 1;
+        private SortOrder fileSortOrder = SortOrder.Descending;
 
         public Dashboard(string dataPath)
         {
             SuspendLayout();
             this.dataPath = dataPath;
+            palette = ChangePalette.Read(dataPath);
             updates = new GitHubUpdates(dataPath, typeof(Program).Assembly.Location);
             cleanup = new CleanupView(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)) { Dock = DockStyle.Fill };
             migration = new MigrationView(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), dataPath) { Dock = DockStyle.Fill };
@@ -247,7 +254,8 @@ namespace DiskDelta
         private void EditSettings()
         {
             using (var dialog = new SettingsWindow(Font, dataPath, typeof(Program).Assembly.Location,
-                drives.Items.Cast<Volume>(), volume, tray.Visible, SetTray, updates, CanInstallUpdate))
+                drives.Items.Cast<Volume>(), volume, tray.Visible, SetTray, updates, CanInstallUpdate,
+                palette, ApplyPalette))
             {
                 if (dialog.ShowDialog(this) == DialogResult.Retry)
                 {
@@ -259,6 +267,21 @@ namespace DiskDelta
             if (history != null) UpdateStatus();
         }
 
+        private void ApplyPalette(ChangePalette colors)
+        {
+            palette = colors;
+            Report report = comparison == null ? selected : comparison.Report;
+            if (report != null && report.Baseline != default(DateTime))
+            {
+                change.ValueColor = ChangeColor(OccupancyChange(report));
+                visible.ValueColor = ChangeColor(report.Growth);
+            }
+            folders.Invalidate();
+            files.Invalidate();
+        }
+
+        private Color ChangeColor(long delta) { return delta == 0 ? Ink : palette.Foreground(delta); }
+
         private bool CanInstallUpdate()
         {
             return scanning == null && !cleanup.Mutating && !migration.Mutating;
@@ -269,8 +292,9 @@ namespace DiskDelta
             var result = await updates.CheckAsync(false);
             if (!IsDisposed && result.Release != null)
             {
-                settings.Text = "设置 · 更新";
+                settings.Text = toolbarSettings.Text = "设置 · 更新";
                 tips.SetToolTip(settings, result.Message);
+                tips.SetToolTip(toolbarSettings, result.Message);
             }
         }
 
@@ -333,10 +357,11 @@ namespace DiskDelta
 
             header = new TableLayoutPanel
             {
-                ColumnCount = 3, RowCount = 1, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8)
+                ColumnCount = 4, RowCount = 1, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8)
             };
             header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 158));
             header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
             header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
             header.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             page.Controls.Add(header, 0, 0);
@@ -352,9 +377,13 @@ namespace DiskDelta
             scanButton.Dock = DockStyle.Fill;
             scanButton.Margin = new Padding(6, 1, 0, 1);
             scanButton.Click += async delegate { await Scan(); };
+            settings.Dock = DockStyle.Fill;
+            settings.Margin = new Padding(0, 1, 3, 1);
+            settings.Click += delegate { EditSettings(); };
             header.Controls.Add(drives, 0, 0);
             header.Controls.Add(period, 1, 0);
-            header.Controls.Add(scanButton, 2, 0);
+            header.Controls.Add(settings, 2, 0);
+            header.Controls.Add(scanButton, 3, 0);
 
             cards = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = new Padding(0, 0, 0, 8) };
             cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));
@@ -387,12 +416,12 @@ namespace DiskDelta
             viewHint.Dock = DockStyle.Fill;
             viewHint.TextAlign = ContentAlignment.MiddleRight;
             viewHint.AutoEllipsis = true;
-            settings.Dock = DockStyle.Right;
-            settings.Width = 82;
-            settings.Click += delegate { EditSettings(); };
+            toolbarSettings.Dock = DockStyle.Right;
+            toolbarSettings.Width = 82;
+            toolbarSettings.Click += delegate { EditSettings(); };
             toolbar.Controls.Add(viewHint);
             toolbar.Controls.Add(segmented);
-            toolbar.Controls.Add(settings);
+            toolbar.Controls.Add(toolbarSettings);
             content.Controls.Add(toolbar, 0, 0);
             content.Controls.Add(results, 0, 1);
             page.Controls.Add(content, 0, 2);
@@ -419,9 +448,20 @@ namespace DiskDelta
         private void ConfigureTables()
         {
             Column(files, "变化", 73);
-            Column(files, "增加", 114, true);
+            Column(files, "增加", 114);
             Column(files, "当前大小", 114);
             Column(files, "文件路径", 0);
+            ConfigureSorting(files, SortFiles);
+            ShowSort(files, fileSortColumn, fileSortOrder);
+            files.SortCompare += CompareFileRows;
+            files.CellFormatting += delegate(object sender, DataGridViewCellFormattingEventArgs e)
+            {
+                if (e.ColumnIndex == 1 && e.RowIndex >= 0)
+                {
+                    var item = files.Rows[e.RowIndex].Tag as Change;
+                    if (item != null) palette.Apply(e.CellStyle, item.Delta);
+                }
+            };
             ConfigureFolderTree();
             timeline.OpenSaved += delegate(Report report)
             {
@@ -432,7 +472,7 @@ namespace DiskDelta
                 SetView(0);
             };
             timeline.OpenComparison += async delegate(Report earlier, Report later) { await OpenComparison(earlier, later); };
-            AttachPathActions(files, false, index => (string)files.Rows[index].Tag);
+            AttachPathActions(files, false, index => ((Change)files.Rows[index].Tag).Path);
         }
 
         private void ConfigureFolderTree()
@@ -442,6 +482,8 @@ namespace DiskDelta
             Column(folders, "对照大小", 110);
             Column(folders, "当前大小", 110);
             Column(folders, "净变化", 113);
+            ConfigureSorting(folders, SortFolders);
+            ShowSort(folders, folderSortColumn, folderSortOrder);
             for (int index = 1; index < folders.Columns.Count; index++)
             {
                 folders.Columns[index].DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
@@ -470,8 +512,7 @@ namespace DiskDelta
                 if (e.ColumnIndex == 0)
                     e.CellStyle.Padding = new Padding(TablePixels(7) + Indent(node), 0, TablePixels(7), 0);
                 if (e.ColumnIndex == 3 && node.Change.Delta.HasValue)
-                    e.CellStyle.ForeColor = node.Change.Delta.Value > 0 ? Rise :
-                        node.Change.Delta.Value < 0 ? Accent : Muted;
+                    palette.Apply(e.CellStyle, node.Change.Delta.Value);
             };
             folders.CellToolTipTextNeeded += delegate(object sender, DataGridViewCellToolTipTextNeededEventArgs e)
             {
@@ -512,6 +553,92 @@ namespace DiskDelta
                 e.Handled = e.SuppressKeyPress = true;
             };
             AttachPathActions(folders, true, index => folderRows[index].Change.Path);
+        }
+
+        private void ConfigureSorting(DataGridView grid, Action<int> sort)
+        {
+            foreach (DataGridViewColumn column in grid.Columns)
+            {
+                column.SortMode = DataGridViewColumnSortMode.Programmatic;
+                column.HeaderCell.ToolTipText = "点击切换升序和降序";
+            }
+            grid.ColumnHeaderMouseClick += delegate(object sender, DataGridViewCellMouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Left && e.ColumnIndex >= 0) sort(e.ColumnIndex);
+            };
+            grid.CellPainting += delegate(object sender, DataGridViewCellPaintingEventArgs e)
+            {
+                if (e.RowIndex != -1 || e.ColumnIndex < 0 ||
+                    grid.Columns[e.ColumnIndex].HeaderCell.SortGlyphDirection != SortOrder.None) return;
+                e.Paint(e.ClipBounds, e.PaintParts);
+                int x = e.CellBounds.Right - TablePixels(15), y = e.CellBounds.Top + e.CellBounds.Height / 2;
+                int half = TablePixels(3);
+                using (var ink = new SolidBrush(Color.FromArgb(130, 148, 157)))
+                {
+                    e.Graphics.FillPolygon(ink, new[] { new Point(x, y - half - 1), new Point(x - half, y - 1), new Point(x + half, y - 1) });
+                    e.Graphics.FillPolygon(ink, new[] { new Point(x, y + half + 1), new Point(x - half, y + 1), new Point(x + half, y + 1) });
+                }
+                e.Handled = true;
+            };
+        }
+
+        private static SortOrder NextSort(int column, int previous, SortOrder order, bool alphabetic)
+        {
+            if (column == previous) return order == SortOrder.Ascending ? SortOrder.Descending : SortOrder.Ascending;
+            return alphabetic ? SortOrder.Ascending : SortOrder.Descending;
+        }
+
+        private static void ShowSort(DataGridView grid, int column, SortOrder order)
+        {
+            foreach (DataGridViewColumn item in grid.Columns)
+                item.HeaderCell.SortGlyphDirection = item.Index == column ? order : SortOrder.None;
+            grid.Invalidate();
+        }
+
+        private void SortFolders(int column)
+        {
+            folderSortOrder = NextSort(column, folderSortColumn, folderSortOrder, column == 0);
+            folderSortColumn = column;
+            if (tree != null)
+            {
+                var cell = folders.CurrentCell;
+                var selectedNode = cell == null ? null : folderRows[cell.RowIndex];
+                ShowFolderRows();
+                int row = folderRows.IndexOf(selectedNode);
+                if (row >= 0) folders.CurrentCell = folders.Rows[row].Cells[cell.ColumnIndex];
+            }
+            ShowSort(folders, folderSortColumn, folderSortOrder);
+        }
+
+        private void SortFiles(int column)
+        {
+            fileSortOrder = NextSort(column, fileSortColumn, fileSortOrder, column == 0 || column == 3);
+            fileSortColumn = column;
+            ApplyFileSort();
+        }
+
+        private void ApplyFileSort()
+        {
+            if (files.Rows.Count > 1)
+                files.Sort(files.Columns[fileSortColumn], fileSortOrder == SortOrder.Ascending ?
+                    ListSortDirection.Ascending : ListSortDirection.Descending);
+            ShowSort(files, fileSortColumn, fileSortOrder);
+        }
+
+        private void CompareFileRows(object sender, DataGridViewSortCompareEventArgs e)
+        {
+            var left = (Change)files.Rows[e.RowIndex1].Tag;
+            var right = (Change)files.Rows[e.RowIndex2].Tag;
+            int result;
+            switch (e.Column.Index)
+            {
+                case 0: result = StringComparer.CurrentCultureIgnoreCase.Compare(left.Kind, right.Kind); break;
+                case 1: result = left.Delta.CompareTo(right.Delta); break;
+                case 2: result = left.Size.CompareTo(right.Size); break;
+                default: result = StringComparer.CurrentCultureIgnoreCase.Compare(left.Path, right.Path); break;
+            }
+            e.SortResult = result != 0 ? result : StringComparer.Ordinal.Compare(left.Path, right.Path);
+            e.Handled = true;
         }
 
         private int Indent(DirectoryTree.Node node)
@@ -565,6 +692,7 @@ namespace DiskDelta
 
         private void ShowFolderRows()
         {
+            tree.Sort(folderSortColumn, folderSortOrder == SortOrder.Descending);
             tree.Visible(folderRows);
             folders.RowCount = folderRows.Count;
             folders.Invalidate();
@@ -679,10 +807,10 @@ namespace DiskDelta
 
             if (hasBaseline)
             {
-                long baselineCapacity = report.BaselineCapacity > 0 ? report.BaselineCapacity : report.Capacity;
-                long physicalChange = (report.Capacity - report.Free) - (baselineCapacity - report.BaselineFree);
-                change.Set(Signed(physicalChange), volume.Letter + " 占用", physicalChange > 0 ? Rise : Accent);
-                visible.Set(Bytes(report.Growth), string.Format("新增 {0:N0} · 增大 {1:N0}", report.Added, report.Expanded));
+                long physicalChange = OccupancyChange(report);
+                change.Set(Signed(physicalChange), volume.Letter + " 占用", ChangeColor(physicalChange));
+                visible.Set(Bytes(report.Growth), string.Format("新增 {0:N0} · 增大 {1:N0}", report.Added, report.Expanded),
+                    ChangeColor(report.Growth));
                 tips.SetToolTip(visible, "文件逻辑大小净变化 " + Signed(report.Net));
                 foreach (Change item in report.FileChanges)
                     AddPathRow(files, item, item.Kind, Signed(item.Delta), Bytes(item.Size), item.Path);
@@ -693,8 +821,15 @@ namespace DiskDelta
                 visible.Set("—", "等待第二次快照");
                 tips.SetToolTip(visible, null);
             }
+            ApplyFileSort();
             UpdateStatus();
             SetView(activeView);
+        }
+
+        private static long OccupancyChange(Report report)
+        {
+            long baselineCapacity = report.BaselineCapacity > 0 ? report.BaselineCapacity : report.Capacity;
+            return (report.Capacity - report.Free) - (baselineCapacity - report.BaselineFree);
         }
 
         private void SetDisk(long free, long total, string prefix)
@@ -731,6 +866,7 @@ namespace DiskDelta
                 page.ResumeLayout(true);
             }
             activeView = view;
+            toolbarSettings.Visible = !showHeader;
             period.Visible = view < 2;
             state.Visible = view < 2 || scanning != null;
             for (int index = 0; index < viewButtons.Length; index++)
@@ -849,7 +985,7 @@ namespace DiskDelta
         private static void AddPathRow(DataGridView grid, Change item, params object[] cells)
         {
             int index = grid.Rows.Add(cells);
-            grid.Rows[index].Tag = item.Path;
+            grid.Rows[index].Tag = item;
             grid.Rows[index].Cells[cells.Length - 1].ToolTipText = item.Path;
         }
 
@@ -879,7 +1015,7 @@ namespace DiskDelta
             return grid;
         }
 
-        internal static void Column(DataGridView grid, string caption, int width, bool accent = false)
+        internal static void Column(DataGridView grid, string caption, int width)
         {
             var column = new DataGridViewTextBoxColumn
             {
@@ -887,7 +1023,6 @@ namespace DiskDelta
             };
             if (width == 0) column.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
             else column.Width = width;
-            if (accent) column.DefaultCellStyle.ForeColor = Accent;
             grid.Columns.Add(column);
         }
 
@@ -931,6 +1066,7 @@ namespace DiskDelta
             private readonly Label detail = Label("", 9, Muted);
             private readonly bool hasBar;
             private double used;
+            public Color ValueColor { set { this.value.ForeColor = value; } }
 
             public Metric(string caption, bool hasBar)
             {

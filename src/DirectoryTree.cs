@@ -37,13 +37,32 @@ namespace DiskDelta
                     Link(change.Path).Change = change;
             }
             if (Root != null) Root.Expanded = true;
+        }
+
+        public void Sort(int column, bool descending)
+        {
+            Comparison<Node> compare = (left, right) =>
+            {
+                if (column == 0)
+                    return descending ? CompareName(right, left) : CompareName(left, right);
+                long? first = Size(left.Change, column), second = Size(right.Change, column);
+                if (first.HasValue != second.HasValue) return first.HasValue ? -1 : 1;
+                int order = descending ? Nullable.Compare(second, first) : Nullable.Compare(first, second);
+                return order == 0 ? CompareName(left, right) : order;
+            };
             foreach (Node node in nodes.Values)
-                if (node.Children.Count > 1)
-                    node.Children.Sort((left, right) =>
-                    {
-                        int order = Math.Abs(right.Change.Delta ?? 0).CompareTo(Math.Abs(left.Change.Delta ?? 0));
-                        return order == 0 ? StringComparer.CurrentCultureIgnoreCase.Compare(left.Caption, right.Caption) : order;
-                    });
+                if (node.Children.Count > 1) node.Children.Sort(compare);
+        }
+
+        private static int CompareName(Node left, Node right)
+        {
+            int order = StringComparer.CurrentCultureIgnoreCase.Compare(left.Caption, right.Caption);
+            return order == 0 ? StringComparer.Ordinal.Compare(left.Change.Path, right.Change.Path) : order;
+        }
+
+        private static long? Size(DirectoryChange change, int column)
+        {
+            return column == 1 ? change.Before : column == 2 ? change.After : change.Delta;
         }
 
         public static DirectoryTree FromLegacy(Report report)

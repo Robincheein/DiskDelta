@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -27,13 +26,13 @@ namespace DiskDelta
         private const int DpiChangedMessage = 0x02e0;
 
         private readonly string dataPath;
+        private readonly GitHubUpdates updates;
         private History history;
         private Volume volume;
-        private DailySchedule schedule;
         private readonly ComboBox drives = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, IntegralHeight = true };
         private readonly ToolTip tips = new ToolTip();
         private readonly Button scanButton = Button("立即扫描", true);
-        private readonly Button scheduleButton = Button("每日扫描", false);
+        private readonly Button settings = Button("设置", false);
         private readonly Label period = Label("", 9, Muted);
         private readonly Label state = Label("", 9, Muted);
         private readonly ProgressBar progressBar = new ProgressBar();
@@ -61,7 +60,6 @@ namespace DiskDelta
         private Report selected;
         private string latestReportId;
         private SnapshotComparison comparison;
-        private DailySchedule.Status scheduleStatus;
         private CancellationTokenSource scanning;
         private DateTime lastWrite;
         private int activeView;
@@ -84,6 +82,7 @@ namespace DiskDelta
         {
             SuspendLayout();
             this.dataPath = dataPath;
+            updates = new GitHubUpdates(dataPath, typeof(Program).Assembly.Location);
             cleanup = new CleanupView(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)) { Dock = DockStyle.Fill };
             migration = new MigrationView(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), dataPath) { Dock = DockStyle.Fill };
             Text = "磁盘日记";
@@ -105,7 +104,7 @@ namespace DiskDelta
             ResumeLayout(true);
             var choices = Volume.Available().ToList();
             drives.Items.AddRange(choices.ToArray());
-            drives.SelectedIndexChanged += async delegate { await SelectDrive(); };
+            drives.SelectedIndexChanged += delegate { SelectDrive(); };
             if (choices.Count > 0)
             {
                 int preferred = choices.FindIndex(item => item.Root == Program.DefaultRoot);
@@ -114,14 +113,15 @@ namespace DiskDelta
             else
             {
                 period.Text = "没有可用的本地磁盘";
-                scanButton.Enabled = scheduleButton.Enabled = false;
+                scanButton.Enabled = false;
             }
             SetView(0);
-            Shown += async delegate
+            Shown += delegate
             {
+                if (history != null && Directory.GetLastWriteTimeUtc(history.DirectoryPath) != lastWrite)
+                    LoadHistory(false);
                 if (activeView == 0) CheckLegacyTree();
-                if (schedule != null) await ReadSchedule();
-                if (!IsDisposed) refresh.Start();
+                refresh.Start();
             };
             refresh.Tick += delegate
             {
@@ -222,6 +222,7 @@ namespace DiskDelta
         }
 
         private string TrayPreference { get { return Path.Combine(dataPath, "tray.enabled"); } }
+        public bool TrayEnabled { get { return tray.Visible; } }
 
         private void ConfigureTray()
         {
@@ -245,33 +246,31 @@ namespace DiskDelta
 
         private void EditSettings()
         {
-            using (var dialog = new Form
+            using (var dialog = new SettingsWindow(Font, dataPath, typeof(Program).Assembly.Location,
+                drives.Items.Cast<Volume>(), volume, tray.Visible, SetTray, updates, CanInstallUpdate))
             {
-                Text = "设置", Font = Font, BackColor = Color.White, ClientSize = new Size(346, 116),
-                FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent,
-                MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false
-            })
-            {
-                var enabled = new CheckBox
+                if (dialog.ShowDialog(this) == DialogResult.Retry)
                 {
-                    Text = "关闭或最小化时留在系统托盘", Checked = tray.Visible, AutoSize = true,
-                    Location = new Point(17, 19)
-                };
-                var save = Button("保存", true);
-                save.SetBounds(228, 58, 100, 35);
-                save.DialogResult = DialogResult.OK;
-                var cancel = Button("取消", false);
-                cancel.SetBounds(122, 58, 100, 35);
-                cancel.DialogResult = DialogResult.Cancel;
-                dialog.AcceptButton = save;
-                dialog.CancelButton = cancel;
-                dialog.Controls.AddRange(new Control[] { enabled, save, cancel });
-                dialog.AutoScaleDimensions = new SizeF(BaseDpi, BaseDpi);
-                dialog.AutoScaleMode = AutoScaleMode.Dpi;
-                if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                try { SetTray(enabled.Checked); }
-                catch (IOException ex) { MessageBox.Show(this, ex.Message, "设置未保存"); }
-                catch (UnauthorizedAccessException ex) { MessageBox.Show(this, ex.Message, "设置未保存"); }
+                    leaving = true;
+                    Close();
+                    return;
+                }
+            }
+            if (history != null) UpdateStatus();
+        }
+
+        private bool CanInstallUpdate()
+        {
+            return scanning == null && !cleanup.Mutating && !migration.Mutating;
+        }
+
+        public async void CheckForUpdates()
+        {
+            var result = await updates.CheckAsync(false);
+            if (!IsDisposed && result.Release != null)
+            {
+                settings.Text = "设置 · 更新";
+                tips.SetToolTip(settings, result.Message);
             }
         }
 
@@ -333,11 +332,10 @@ namespace DiskDelta
 
             header = new TableLayoutPanel
             {
-                ColumnCount = 4, RowCount = 1, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8)
+                ColumnCount = 3, RowCount = 1, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8)
             };
             header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 158));
             header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
             header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
             header.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             page.Controls.Add(header, 0, 0);
@@ -350,14 +348,12 @@ namespace DiskDelta
             period.TextAlign = ContentAlignment.MiddleLeft;
             period.AutoEllipsis = true;
             period.TextChanged += delegate { tips.SetToolTip(period, period.Text); };
-            scanButton.Dock = scheduleButton.Dock = DockStyle.Fill;
-            scanButton.Margin = scheduleButton.Margin = new Padding(6, 1, 0, 1);
+            scanButton.Dock = DockStyle.Fill;
+            scanButton.Margin = new Padding(6, 1, 0, 1);
             scanButton.Click += async delegate { await Scan(); };
-            scheduleButton.Click += async delegate { await EditSchedule(); };
             header.Controls.Add(drives, 0, 0);
             header.Controls.Add(period, 1, 0);
-            header.Controls.Add(scheduleButton, 2, 0);
-            header.Controls.Add(scanButton, 3, 0);
+            header.Controls.Add(scanButton, 2, 0);
 
             cards = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = new Padding(0, 0, 0, 8) };
             cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));
@@ -390,9 +386,8 @@ namespace DiskDelta
             viewHint.Dock = DockStyle.Fill;
             viewHint.TextAlign = ContentAlignment.MiddleRight;
             viewHint.AutoEllipsis = true;
-            var settings = Button("设置", false);
             settings.Dock = DockStyle.Right;
-            settings.Width = 68;
+            settings.Width = 82;
             settings.Click += delegate { EditSettings(); };
             toolbar.Controls.Add(viewHint);
             toolbar.Controls.Add(segmented);
@@ -609,19 +604,15 @@ namespace DiskDelta
             }
         }
 
-        private async Task SelectDrive()
+        private void SelectDrive()
         {
             volume = drives.SelectedItem as Volume;
             if (volume == null) return;
             history = History.ForDrive(dataPath, volume.Root, volume.Id);
-            schedule = new DailySchedule(typeof(Program).Assembly.Location, volume.Root, volume.Id);
-            scheduleStatus = null;
-            scheduleButton.Text = "每日扫描";
             selected = null;
             comparison = null;
             treeReportId = null;
             LoadHistory(true, true);
-            if (Visible) await ReadSchedule();
         }
 
         private void LoadHistory(bool newest, bool resetTimeline = false)
@@ -820,81 +811,6 @@ namespace DiskDelta
             if (error != null) state.Text = error;
         }
 
-        private async Task ReadSchedule()
-        {
-            DailySchedule requested = schedule;
-            try
-            {
-                var status = await Task.Run(() => requested.Read());
-                if (IsDisposed || schedule != requested) return;
-                scheduleStatus = status;
-                scheduleButton.Text = scheduleStatus == null || !scheduleStatus.Enabled ? "每日扫描" :
-                    scheduleStatus.MatchesExecutable ? "每日 " + FormatTime(scheduleStatus.Time) : "重新绑定计划";
-                tips.SetToolTip(scheduleButton, scheduleStatus == null ? "设置 Windows 每日扫描任务" :
-                    scheduleStatus.MatchesExecutable ? "管理 Windows 每日扫描任务" : "EXE 路径已变化。保存时间以更新任务。");
-            }
-            catch (Exception ex) { if (!IsDisposed && schedule == requested) tips.SetToolTip(scheduleButton, ex.Message); }
-        }
-
-        private async Task EditSchedule()
-        {
-            using (var dialog = new Form
-            {
-                Text = "每日扫描", Font = Font, BackColor = Color.White, ClientSize = new Size(372, 163),
-                FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent,
-                MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false
-            })
-            {
-                var title = Label("每天扫描 " + volume.Letter + " 的时间", 12, Ink, true);
-                title.SetBounds(17, 13, 320, 26);
-                var time = new DateTimePicker
-                {
-                    Format = DateTimePickerFormat.Custom, CustomFormat = "HH:mm", ShowUpDown = true,
-                    Value = DateTime.Today.Add(scheduleStatus == null ? DailySchedule.DefaultTime : scheduleStatus.Time)
-                };
-                time.SetBounds(19, 48, 95, 27);
-                var hint = Label("Windows 任务计划在你登录时运行。", 9, Muted);
-                hint.SetBounds(18, 79, 340, 24);
-                var save = Button("启用每日扫描", true);
-                save.SetBounds(220, 110, 133, 35);
-                save.DialogResult = DialogResult.OK;
-                var disable = Button("关闭每日扫描", false);
-                disable.SetBounds(81, 110, 132, 35);
-                disable.DialogResult = DialogResult.No;
-                disable.Visible = scheduleStatus != null;
-                dialog.AcceptButton = save;
-                dialog.Controls.AddRange(new Control[] { title, time, hint, save, disable });
-                dialog.AutoScaleDimensions = new SizeF(96, 96);
-                dialog.AutoScaleMode = AutoScaleMode.Dpi;
-                DialogResult answer = dialog.ShowDialog(this);
-                if (answer != DialogResult.OK && answer != DialogResult.No) return;
-                scheduleButton.Enabled = false;
-                DailySchedule requested = schedule;
-                History requestedHistory = history;
-                try
-                {
-                    var at = new TimeSpan(time.Value.Hour, time.Value.Minute, 0);
-                    await Task.Run(() =>
-                    {
-                        if (answer == DialogResult.OK) requested.Enable(at);
-                        else requested.Disable();
-                        requestedHistory.ClearScheduledError();
-                    });
-                    if (IsDisposed || schedule != requested) return;
-                    await ReadSchedule();
-                    if (IsDisposed || schedule != requested) return;
-                    UpdateStatus();
-                    if (scanning == null)
-                        state.Text = answer == DialogResult.OK ? "每日扫描已启用 · " + FormatTime(at) : "每日扫描已关闭。";
-                }
-                catch (Exception ex)
-                {
-                    if (!IsDisposed) MessageBox.Show(this, ex.Message, "任务计划未能保存", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-                finally { if (!IsDisposed) scheduleButton.Enabled = true; }
-            }
-        }
-
         private void AttachPathActions(DataGridView grid, bool isFolder, Func<int, string> rowPath)
         {
             var menu = new ContextMenuStrip();
@@ -997,7 +913,6 @@ namespace DiskDelta
         }
 
         internal static string Date(DateTime value) { return value.ToString("yyyy-MM-dd HH:mm"); }
-        private static string FormatTime(TimeSpan value) { return value.ToString(@"hh\:mm", CultureInfo.InvariantCulture); }
         internal static string Signed(long value) { return (value > 0 ? "+" : value < 0 ? "−" : "") + Bytes(Math.Abs(value)); }
 
         internal static string Bytes(long value)

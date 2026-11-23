@@ -19,7 +19,7 @@ $options = @(
     '/nologo', '/target:winexe', '/platform:anycpu', '/optimize+', '/codepage:65001', '/warnaserror+',
     "/out:$exe", "/win32manifest:$source\app.manifest", "/win32icon:$source\app.ico",
     '/r:System.dll', '/r:System.Core.dll', '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll',
-    '/r:System.Xml.dll', '/r:System.Xml.Linq.dll', '/r:Microsoft.CSharp.dll'
+    '/r:System.Xml.dll', '/r:System.Xml.Linq.dll', '/r:System.Runtime.Serialization.dll', '/r:Microsoft.CSharp.dll'
 )
 & $compiler @options @sources
 if ($LASTEXITCODE -ne 0) { throw "Compilation failed ($LASTEXITCODE)." }

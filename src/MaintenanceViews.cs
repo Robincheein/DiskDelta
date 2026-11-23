@@ -387,7 +387,19 @@ namespace DiskDelta
             layout.Dock = DockStyle.Top;
             layout.Height = 300;
             body.Controls.Add(layout);
-            layout.Controls.Add(MaintenanceView.Note("迁移应用目录到其他 NTFS 盘"), 0, 0);
+            var heading = MaintenanceView.Note("迁移应用目录到其他 NTFS 盘");
+            heading.Dock = DockStyle.None;
+            heading.AutoSize = true;
+            heading.Margin = new Padding(5, 6, 5, 0);
+            var help = MaintenanceView.Action("?");
+            help.AutoSize = false;
+            help.MinimumSize = Size.Empty;
+            help.Size = new Size(23, 23);
+            help.Margin = new Padding(0, 1, 0, 0);
+            help.AccessibleName = "目录迁移说明";
+            tips.SetToolTip(help, "目录迁移说明");
+            help.Click += delegate { ShowHelp(); };
+            layout.Controls.Add(MaintenanceView.Actions(heading, help), 0, 0);
             layout.Controls.Add(PathInput("C 盘源目录", source, profileDirectory), 0, 1);
             layout.Controls.Add(PathInput("目标父目录", destination, ""), 0, 2);
             layout.Controls.Add(MaintenanceView.Actions(move), 0, 3);
@@ -403,6 +415,60 @@ namespace DiskDelta
             records.SelectedIndexChanged += delegate { ShowRecord(); };
             Reload(null);
             Disposed += delegate { tips.Dispose(); };
+        }
+
+        private void ShowHelp()
+        {
+            using (var dialog = new Form
+            {
+                Text = "目录迁移说明", Font = Font, BackColor = Color.White, ClientSize = new Size(608, 520),
+                MinimumSize = new Size(430, 360), StartPosition = FormStartPosition.CenterParent,
+                MinimizeBox = false, ShowInTaskbar = false
+            })
+            using (var bold = new Font(Font, FontStyle.Bold))
+            {
+                var layout = MaintenanceView.Layout(0, 36);
+                layout.Padding = new Padding(14, 10, 14, 8);
+                var text = new RichTextBox
+                {
+                    Dock = DockStyle.Fill, ReadOnly = true, DetectUrls = false, ScrollBars = RichTextBoxScrollBars.Vertical,
+                    BackColor = Color.White, BorderStyle = BorderStyle.None, AccessibleName = "目录迁移操作、例子与风险"
+                };
+                AddHelp(text, bold, "目录迁移是什么",
+                    "把 C 盘中某个软件的配置或缓存目录复制并校验到另一个盘，再在原路径建立 NTFS 目录联接。软件仍可以使用原来的 C 盘路径，实际读写会到目标盘。");
+                AddHelp(text, bold, "举例：把 ExampleApp 的缓存迁到 D 盘",
+                    "C 盘源目录填\nC:\\Users\\小林\\AppData\\Local\\ExampleApp\\Cache\n\n" +
+                    "目标父目录选择已存在的 D:\\迁移目录\\ExampleApp\n" +
+                    "实际目标会是 D:\\迁移目录\\ExampleApp\\Cache。原 C 盘路径会指向这个目标。");
+                AddHelp(text, bold, "迁移前",
+                    "完全退出相关软件，包括它的托盘和后台进程。先挑一个明确属于该软件的缓存或配置子目录，避免整搬用户目录、AppData 或安装目录。" +
+                    "目标盘须为长期连接的固定 NTFS 盘，留足空间。目标父目录下须留出源目录的同名位置。");
+                AddHelp(text, bold, "什么时候释放 C 盘空间",
+                    "迁移完成后，原文件会作为备份留在 C 盘。先重新打开软件，确认功能、配置和读写正常。再次关掉软件后，可以在迁移记录里选择「释放 C 盘备份」。" +
+                    "程序会核对备份文件及其数据流，目标文件缺失或被改写时会保留备份。释放会永久删除原盘备份。");
+                AddHelp(text, bold, "如何恢复及日常注意事项",
+                    "备份还在时，关闭相关软件并选择「恢复原目录」，即可把迁移当时的备份放回 C 盘。目标盘的文件仍会保留，迁移后在目标盘新增或修改的数据不会自动合并回 C 盘。" +
+                    "释放备份后无法用该按钮恢复。联接使用固定的盘符和路径，目标盘断开、改盘符或目录改名时，软件可能无法读取配置或缓存。");
+                text.Select(0, 0);
+                var close = MaintenanceView.Action("关闭", true);
+                close.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+                close.DialogResult = DialogResult.OK;
+                dialog.CancelButton = close;
+                layout.Controls.Add(text, 0, 0);
+                layout.Controls.Add(close, 0, 1);
+                dialog.Controls.Add(layout);
+                dialog.AutoScaleDimensions = new SizeF(96, 96);
+                dialog.AutoScaleMode = AutoScaleMode.Dpi;
+                dialog.ShowDialog(this);
+            }
+        }
+
+        private static void AddHelp(RichTextBox text, Font bold, string title, string body)
+        {
+            text.SelectionFont = bold;
+            text.AppendText(title + "\n");
+            text.SelectionFont = text.Font;
+            text.AppendText(body + "\n\n");
         }
 
         private Control PathInput(string label, TextBox text, string initial)

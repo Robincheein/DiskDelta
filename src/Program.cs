@@ -18,9 +18,16 @@ namespace DiskDelta
         [STAThread]
         private static int Main(string[] args)
         {
-            if (args.Length != 0)
+            if (args.Length > 0 && args[0] == "--apply-update")
+                return UpdateInstaller.Apply(typeof(Program).Assembly.Location, args);
+            bool startup = args.Length == 1 && args[0] == "--startup";
+            if (args.Length != 0 && !startup)
                 return Headless(args);
+            return RunDesktop(DataPath, startup);
+        }
 
+        internal static int RunDesktop(string dataPath, bool startup)
+        {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             string name;
@@ -30,20 +37,26 @@ namespace DiskDelta
             using (var activate = new EventWaitHandle(false, EventResetMode.AutoReset, name + "-show"))
             using (var instance = new Mutex(true, name, out first))
             {
-                if (!first) { activate.Set(); return 0; }
-                using (var window = new Dashboard(DataPath))
+                if (!first)
                 {
-                    RegisteredWaitHandle listener = null;
-                    window.Shown += delegate
+                    if (!startup) activate.Set();
+                    return 0;
+                }
+                using (var window = new Dashboard(dataPath))
+                using (var context = new ApplicationContext(startup && window.TrayEnabled ? null : window))
+                {
+                    if (context.MainForm == null)
+                        window.FormClosed += delegate { context.ExitThread(); };
+                    // The activation event also needs a UI handle when Windows starts us in the tray.
+                    if (window.Handle == IntPtr.Zero) return 1;
+                    window.BeginInvoke(new Action(window.CheckForUpdates));
+                    RegisteredWaitHandle listener = ThreadPool.RegisterWaitForSingleObject(activate, delegate
                     {
-                        listener = ThreadPool.RegisterWaitForSingleObject(activate, delegate
-                        {
-                            try { window.BeginInvoke(new Action(window.ShowWindow)); }
-                            catch (InvalidOperationException) { }
-                        }, null, Timeout.Infinite, false);
-                    };
-                    try { Application.Run(window); }
-                    finally { if (listener != null) listener.Unregister(null); }
+                        try { window.BeginInvoke(new Action(window.ShowWindow)); }
+                        catch (InvalidOperationException) { }
+                    }, null, Timeout.Infinite, false);
+                    try { Application.Run(context); }
+                    finally { listener.Unregister(null); }
                 }
             }
             return 0;

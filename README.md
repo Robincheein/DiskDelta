@@ -1,5 +1,3 @@
-# 磁盘日记
-
 从 [GitHub Releases](https://github.com/Robincheein/DiskDelta/releases/latest) 获取 `DiskDelta.exe`，双击即可打开面板。程序使用 Windows 10/11 自带的 .NET Framework，支持 Windows 高 DPI 缩放。
 
 1. 在顶部 **扫描磁盘** 选择盘符，再点 **立即扫描**。第一次建立基准，再扫一次就能比较。
@@ -46,9 +44,3 @@
 ## 软件位置
 
 从 Windows 的卸载登记和 App Paths 读取桌面软件，再读取当前用户的应用包安装位置。可按名称或发布者筛选。点 **扫描所有盘符**，程序会检查所有就绪盘符内能访问的目录与程序名。右侧区分登记位置和同名线索，可展开目录或右键定位。名称匹配需要核对，未登记的任意文件无法仅凭注册表确定归属。全盘扫描时间随文件数和磁盘速度变化。
-
-## 扫描与构建
-
-WizTree 随安装提供的说明中，NTFS 快扫需要管理员权限并直接读取 MFT（主文件表）。磁盘日记以普通用户权限通过 Windows 批量枚举目录，并按路径合并两次快照。目录树参考了 WizTree 的层级浏览方式，列用于展示快照前后的差异。[WizTree](https://diskanalyzer.com/)
-
-在 PowerShell 中运行 `.\build.ps1`，生成 `dist\DiskDelta.exe`。Git 追踪源码，版本使用 Git 标签区分。每个 GitHub Release 的下载文件统一为 `DiskDelta.exe`。

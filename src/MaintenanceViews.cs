@@ -70,6 +70,8 @@ namespace DiskDelta
 
     internal sealed class CleanupView : UserControl
     {
+        private const int CountColumnWidth = 76;
+        private const int SizeColumnWidth = 112;
         private readonly Cleanup cleaner;
         private readonly Button scan = MaintenanceView.Action("扫描项目", true);
         private readonly Button apply = MaintenanceView.Action("清理勾选项");
@@ -123,12 +125,14 @@ namespace DiskDelta
             });
             list.Columns.Add(new DataGridViewTextBoxColumn
             {
-                HeaderText = "数量", Width = 62, ReadOnly = true,
+                Name = "Count", HeaderText = "数量", MinimumWidth = CountColumnWidth, ReadOnly = true,
+                AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells,
                 DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleRight }
             });
             list.Columns.Add(new DataGridViewTextBoxColumn
             {
-                HeaderText = "大小", Width = 90, ReadOnly = true,
+                Name = "Size", HeaderText = "大小", MinimumWidth = SizeColumnWidth, ReadOnly = true,
+                AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells,
                 DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleRight }
             });
             foreach (DataGridViewColumn column in list.Columns) column.SortMode = DataGridViewColumnSortMode.NotSortable;
@@ -175,8 +179,19 @@ namespace DiskDelta
                 if (args.KeyCode == Keys.Enter && LoadMore(files.SelectedNode)) args.Handled = args.SuppressKeyPress = true;
             };
             ConfigureFileMenu();
+            ScaleColumns(96);
             ShowResults(cleaner.Options());
             apply.Enabled = false;
+        }
+
+        internal void ScaleColumns(int dpi)
+        {
+            double scale = dpi / 96.0;
+            list.Columns["Count"].MinimumWidth = (int)Math.Round(CountColumnWidth * scale);
+            list.Columns["Size"].MinimumWidth = (int)Math.Round(SizeColumnWidth * scale);
+            var padding = new Padding(0, 0, (int)Math.Round(6 * scale), 0);
+            list.Columns["Count"].DefaultCellStyle.Padding = padding;
+            list.Columns["Size"].DefaultCellStyle.Padding = padding;
         }
 
         private void ConfigureFileMenu()

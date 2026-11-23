@@ -289,6 +289,7 @@ namespace DiskDelta
         {
             if (tableDpi == dpi) return;
             tableDpi = dpi;
+            cleanup.ScaleColumns(dpi);
             int height = TablePixels(GridRowHeight);
             var padding = new Padding(TablePixels(7), 0, TablePixels(7), 0);
             foreach (DataGridView grid in new[] { folders, files, timeline.Records })

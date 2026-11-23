@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Globalization;
@@ -921,13 +920,8 @@ namespace DiskDelta
         {
             try
             {
-                string target = isFolder ? path : Path.GetDirectoryName(path);
-                if (!Directory.Exists(target))
-                    throw new DirectoryNotFoundException("该路径已移动、已删除或无法访问。");
-                if (!isFolder && File.Exists(path))
-                    Process.Start("explorer.exe", "/select,\"" + path + "\"");
-                else
-                    Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
+                if (!isFolder && File.Exists(path)) ExplorerLocation.Reveal(path);
+                else ExplorerLocation.OpenFolder(isFolder ? path : Path.GetDirectoryName(path));
             }
             catch (Exception ex)
             {

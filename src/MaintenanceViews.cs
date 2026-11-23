@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -70,11 +71,13 @@ namespace DiskDelta
     internal sealed class CleanupView : UserControl
     {
         private readonly Cleanup cleaner;
-        private readonly Button scan = MaintenanceView.Action("扫描缓存", true);
+        private readonly Button scan = MaintenanceView.Action("扫描项目", true);
         private readonly Button apply = MaintenanceView.Action("清理勾选项");
+        private readonly Button system = MaintenanceView.Action("Windows 磁盘清理");
         private readonly Label status = MaintenanceView.Note("");
         private readonly Label details = MaintenanceView.Note("");
         private readonly TreeView files = MaintenanceView.Tree();
+        private readonly ContextMenuStrip fileMenu = new ContextMenuStrip();
         private readonly SplitContainer split = new SplitContainer { Dock = DockStyle.Fill, Panel2Collapsed = true };
         private readonly DataGridView list = new DataGridView
         {
@@ -84,17 +87,17 @@ namespace DiskDelta
             EditMode = DataGridViewEditMode.EditOnEnter
         };
         private bool busy;
+        private bool hasScan;
         public bool Mutating { get; private set; }
 
         public CleanupView(string localAppData)
         {
             cleaner = new Cleanup(localAppData);
-            var main = MaintenanceView.Layout(29, 33, 0, 24);
+            var main = MaintenanceView.Layout(37, 0, 24);
             Controls.Add(main);
-            main.Controls.Add(MaintenanceView.Note("7 天以上的缓存"), 0, 0);
-            main.Controls.Add(MaintenanceView.Actions(scan, apply), 0, 1);
-            main.Controls.Add(split, 0, 2);
-            main.Controls.Add(status, 0, 3);
+            main.Controls.Add(MaintenanceView.Actions(scan, apply, system), 0, 0);
+            main.Controls.Add(split, 0, 1);
+            main.Controls.Add(status, 0, 2);
             split.Panel1.Controls.Add(list);
             var preview = MaintenanceView.Layout(72, 0);
             preview.Controls.Add(details, 0, 0);
@@ -106,6 +109,17 @@ namespace DiskDelta
             {
                 HeaderText = "可清理项目", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, ReadOnly = true
             });
+            list.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                HeaderText = "文件", Width = 62, ReadOnly = true,
+                DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleRight }
+            });
+            list.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                HeaderText = "大小", Width = 90, ReadOnly = true,
+                DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleRight }
+            });
+            foreach (DataGridViewColumn column in list.Columns) column.SortMode = DataGridViewColumnSortMode.NotSortable;
             list.EnableHeadersVisualStyles = false;
             list.ColumnHeadersDefaultCellStyle.BackColor = MaintenanceView.Soft;
             list.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
@@ -132,8 +146,50 @@ namespace DiskDelta
             list.CellValueChanged += delegate { apply.Enabled = !busy && Selected().Any(); };
             scan.Click += async delegate { await Scan(); };
             apply.Click += async delegate { await Apply(); };
-            apply.Enabled = false;
+            system.Click += delegate { OpenDiskCleanup(); };
             files.BeforeExpand += delegate(object sender, TreeViewCancelEventArgs args) { Populate(args.Node); };
+            ConfigureFileMenu();
+            ShowResults(cleaner.Options());
+            apply.Enabled = false;
+        }
+
+        private void ConfigureFileMenu()
+        {
+            var open = fileMenu.Items.Add("打开文件夹", null, delegate { PathAction(ExplorerLocation.OpenFolder); });
+            fileMenu.Items.Add("在资源管理器中定位", null, delegate { PathAction(ExplorerLocation.Reveal); });
+            fileMenu.Items.Add("复制路径", null, delegate { PathAction(Clipboard.SetText); });
+            fileMenu.Opening += delegate(object sender, System.ComponentModel.CancelEventArgs e)
+            {
+                PathItem item = files.SelectedNode == null ? null : files.SelectedNode.Tag as PathItem;
+                e.Cancel = item == null;
+                open.Visible = item != null && item.IsDirectory;
+            };
+            files.ContextMenuStrip = fileMenu;
+            files.MouseDown += delegate(object sender, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Right) files.SelectedNode = files.GetNodeAt(e.Location);
+            };
+            Disposed += delegate { fileMenu.Dispose(); };
+        }
+
+        private void PathAction(Action<string> action)
+        {
+            PathItem item = files.SelectedNode == null ? null : files.SelectedNode.Tag as PathItem;
+            if (item == null) return;
+            try { action(item.Path); }
+            catch (Exception ex) { status.Text = ex.Message; }
+        }
+
+        private void OpenDiskCleanup()
+        {
+            try
+            {
+                string systemPath = Environment.SystemDirectory;
+                var info = new ProcessStartInfo(Path.Combine(systemPath, "cleanmgr.exe"),
+                    "/d " + Path.GetPathRoot(systemPath)[0]) { UseShellExecute = true };
+                Process.Start(info);
+            }
+            catch (Exception ex) { status.Text = "无法打开 Windows 磁盘清理 · " + ex.Message; }
         }
 
         private IEnumerable<CleanupGroup> Selected()
@@ -145,22 +201,24 @@ namespace DiskDelta
         private void Busy(bool value)
         {
             busy = value;
-            scan.Enabled = list.Enabled = !busy;
+            scan.Enabled = list.Enabled = system.Enabled = !busy;
             apply.Enabled = !busy && Selected().Any();
         }
 
         private async Task Scan()
         {
             Busy(true);
-            status.Text = "正在查找可重建的缓存…";
+            status.Text = "正在扫描清理项目…";
             try
             {
                 var groups = await Task.Run(() => cleaner.Scan());
                 if (IsDisposed) return;
+                hasScan = true;
                 ShowResults(groups);
-                status.Text = "共找到 " + groups.Sum(item => item.Files.Count).ToString("N0") + " 个文件。请勾选要清理的类别。";
+                status.Text = "共找到 " + groups.Sum(item => item.Files.Count).ToString("N0") + " 个文件 · " +
+                    Dashboard.Bytes(groups.Sum(item => item.Bytes));
             }
-            catch (Exception ex) { if (!IsDisposed) status.Text = "缓存扫描失败 · " + ex.Message; }
+            catch (Exception ex) { if (!IsDisposed) status.Text = "扫描失败 · " + ex.Message; }
             finally { if (!IsDisposed) Busy(false); }
         }
 
@@ -169,7 +227,7 @@ namespace DiskDelta
             var chosen = Selected().ToList();
             if (chosen.Count == 0 || !MaintenanceView.Confirm(this,
                 "删除勾选类别中预览的 " + chosen.Sum(item => item.Files.Count).ToString("N0") +
-                " 个缓存文件？文件将直接删除以释放空间。", "确认清理缓存")) return;
+                " 个文件？文件将直接删除以释放空间。", "确认清理")) return;
             Mutating = true;
             Busy(true);
             status.Text = "正在清理勾选项…";
@@ -188,14 +246,32 @@ namespace DiskDelta
 
         private void ShowResults(IEnumerable<CleanupGroup> groups)
         {
+            list.SuspendLayout();
             list.Rows.Clear();
-            foreach (CleanupGroup group in groups)
+            try
             {
-                int row = list.Rows.Add(false, group.Name + "   ·   " + group.Files.Count.ToString("N0") +
-                    " 个   ·   " + Dashboard.Bytes(group.Bytes));
-                list.Rows[row].Tag = group;
-                list.Rows[row].Cells[0].ReadOnly = group.Files.Count == 0;
+                foreach (var category in groups.GroupBy(group => group.Category))
+                {
+                    int header = list.Rows.Add(null, category.Key, "", "");
+                    DataGridViewRow heading = list.Rows[header];
+                    heading.Cells[0] = new DataGridViewTextBoxCell { Value = "" };
+                    heading.ReadOnly = true;
+                    heading.DefaultCellStyle.BackColor = MaintenanceView.Soft;
+                    heading.DefaultCellStyle.SelectionBackColor = MaintenanceView.Soft;
+                    heading.DefaultCellStyle.ForeColor = MaintenanceView.Green;
+                    heading.DefaultCellStyle.SelectionForeColor = MaintenanceView.Green;
+                    foreach (CleanupGroup group in category)
+                    {
+                        int index = list.Rows.Add(false, group.Name, hasScan ? group.Files.Count.ToString("N0") : "—",
+                            hasScan ? Dashboard.Bytes(group.Bytes) : "—");
+                        DataGridViewRow row = list.Rows[index];
+                        row.Tag = group;
+                        row.Cells[0].ReadOnly = !hasScan || group.Files.Count == 0;
+                        row.Cells[1].ToolTipText = group.Description;
+                    }
+                }
             }
+            finally { list.ResumeLayout(); }
             list.ClearSelection();
             split.Panel2Collapsed = true;
             files.Nodes.Clear();
@@ -207,9 +283,10 @@ namespace DiskDelta
             if (split.Panel2Collapsed)
             {
                 split.Panel2Collapsed = false;
-                split.SplitterDistance = split.Width * 44 / 100;
+                split.SplitterDistance = split.Width * 48 / 100;
             }
-            details.Text = group.Description + "\n" + group.Files.Count.ToString("N0") + " 个待清理文件 · " + Dashboard.Bytes(group.Bytes);
+            details.Text = group.Description + "\n" + group.Days + " 天以上" + (hasScan ?
+                " · " + group.Files.Count.ToString("N0") + " 个文件 · " + Dashboard.Bytes(group.Bytes) : "");
             files.BeginUpdate();
             try
             {
@@ -219,7 +296,13 @@ namespace DiskDelta
                     var directory = new PreviewDirectory();
                     foreach (CleanupFile file in root)
                         directory.Add(file.Path.Substring(root.Key.Length + 1).Split('\\'), file);
-                    files.Nodes.Add(Node(root.Key, root.Key, directory));
+                    string caption = Path.GetFileName(root.Key);
+                    if (group.ProfileCache != null)
+                    {
+                        string profile = root.Key.Substring(0, root.Key.Length - group.ProfileCache.Length).TrimEnd('\\');
+                        caption = Path.GetFileName(profile) + " / " + caption;
+                    }
+                    files.Nodes.Add(Node(caption, root.Key, directory));
                 }
             }
             finally { files.EndUpdate(); }
@@ -244,23 +327,37 @@ namespace DiskDelta
             }
         }
 
+        private sealed class PathItem
+        {
+            public string Path;
+            public bool IsDirectory;
+            public PreviewDirectory Children;
+        }
+
         private static TreeNode Node(string name, string path, PreviewDirectory directory)
         {
-            var node = new TreeNode(name) { ToolTipText = path, Tag = directory };
+            var node = new TreeNode(name)
+            {
+                ToolTipText = path, Tag = new PathItem { Path = path, IsDirectory = true, Children = directory }
+            };
             node.Nodes.Add("...");
             return node;
         }
 
         private static void Populate(TreeNode node)
         {
-            var directory = node.Tag as PreviewDirectory;
+            var item = node.Tag as PathItem;
+            var directory = item == null ? null : item.Children;
             if (directory == null) return;
-            node.Tag = null;
+            item.Children = null;
             node.Nodes.Clear();
-            foreach (var item in directory.Directories.OrderBy(item => item.Key, StringComparer.CurrentCultureIgnoreCase))
-                node.Nodes.Add(Node(item.Key, Path.Combine(node.ToolTipText, item.Key), item.Value));
-            foreach (CleanupFile file in directory.Items.OrderBy(item => item.Path, StringComparer.CurrentCultureIgnoreCase))
-                node.Nodes.Add(new TreeNode(Path.GetFileName(file.Path) + "  ·  " + Dashboard.Bytes(file.Info.Size)) { ToolTipText = file.Path });
+            foreach (var branch in directory.Directories.OrderBy(entry => entry.Key, StringComparer.CurrentCultureIgnoreCase))
+                node.Nodes.Add(Node(branch.Key, Path.Combine(item.Path, branch.Key), branch.Value));
+            foreach (CleanupFile file in directory.Items.OrderBy(entry => entry.Path, StringComparer.CurrentCultureIgnoreCase))
+                node.Nodes.Add(new TreeNode(Path.GetFileName(file.Path) + "  ·  " + Dashboard.Bytes(file.Info.Size))
+                {
+                    ToolTipText = file.Path, Tag = new PathItem { Path = file.Path }
+                });
         }
     }
 

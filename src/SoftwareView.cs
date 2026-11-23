@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -224,9 +223,8 @@ namespace DiskDelta
             if (path == null) return;
             try
             {
-                if (Directory.Exists(path)) Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
-                else if (File.Exists(path)) Process.Start("explorer.exe", "/select,\"" + path + "\"");
-                else status.Text = "路径不存在、未连接或无权访问。";
+                if (Directory.Exists(path)) ExplorerLocation.OpenFolder(path);
+                else ExplorerLocation.Reveal(path);
             }
             catch (Exception ex) { status.Text = "无法打开路径 · " + ex.Message; }
         }

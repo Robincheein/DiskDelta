@@ -36,7 +36,7 @@ namespace DiskDelta
                 new CleanupGroup
                 {
                     Name = "DirectX 着色器缓存",
-                    Description = "Windows 为 DirectX 应用保存的着色器缓存。清理后会重新生成，游戏首次载入时可能变慢。"
+                    Description = "DirectX 着色器缓存。应用下次使用时会重新生成。"
                 },
                 Browser("Chrome 网页缓存", "chrome", @"Google\Chrome\User Data"),
                 Browser("Edge 网页缓存", "msedge", @"Microsoft\Edge\User Data")
@@ -101,7 +101,7 @@ namespace DiskDelta
             return new CleanupGroup
             {
                 Name = name, App = app, BrowserData = path,
-                Description = "浏览器可重新下载的网页缓存。只检查默认存储路径下的 HTTP 缓存，登录、历史记录、下载及书签不在范围内。运行中的浏览器会整项跳过。"
+                Description = "网页 HTTP 缓存。退出浏览器后可清理。"
             };
         }
 

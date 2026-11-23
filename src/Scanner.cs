@@ -28,6 +28,7 @@ namespace DiskDelta
         public long Capacity { get; set; }
         public long Free { get; set; }
         public long BaselineFree { get; set; }
+        public long BaselineCapacity { get; set; }
         public long Files { get; set; }
         public int Unreadable { get; set; }
         public int BaselineUnreadable { get; set; }

@@ -72,7 +72,7 @@ namespace DiskDelta
         private readonly Cleanup cleaner;
         private readonly Button scan = MaintenanceView.Action("扫描缓存", true);
         private readonly Button apply = MaintenanceView.Action("清理勾选项");
-        private readonly Label status = MaintenanceView.Note("网页和着色器缓存可以重建。点击类别可预览具体文件。");
+        private readonly Label status = MaintenanceView.Note("");
         private readonly Label details = MaintenanceView.Note("");
         private readonly TreeView files = MaintenanceView.Tree();
         private readonly SplitContainer split = new SplitContainer { Dock = DockStyle.Fill, Panel2Collapsed = true };
@@ -91,7 +91,7 @@ namespace DiskDelta
             cleaner = new Cleanup(localAppData);
             var main = MaintenanceView.Layout(29, 33, 0, 24);
             Controls.Add(main);
-            main.Controls.Add(MaintenanceView.Note("建议优先清理可重建的缓存。只列出至少 7 天未写入的本地文件。"), 0, 0);
+            main.Controls.Add(MaintenanceView.Note("7 天以上的缓存"), 0, 0);
             main.Controls.Add(MaintenanceView.Actions(scan, apply), 0, 1);
             main.Controls.Add(split, 0, 2);
             main.Controls.Add(status, 0, 3);
@@ -290,7 +290,7 @@ namespace DiskDelta
             layout.Dock = DockStyle.Top;
             layout.Height = 300;
             body.Controls.Add(layout);
-            layout.Controls.Add(MaintenanceView.Note("将单个应用目录迁到另一块 NTFS 磁盘。请先退出使用源目录的软件。"), 0, 0);
+            layout.Controls.Add(MaintenanceView.Note("迁移应用目录到其他 NTFS 盘"), 0, 0);
             layout.Controls.Add(PathInput("C 盘源目录", source, profileDirectory), 0, 1);
             layout.Controls.Add(PathInput("目标父目录", destination, ""), 0, 2);
             layout.Controls.Add(MaintenanceView.Actions(move), 0, 3);
@@ -362,7 +362,7 @@ namespace DiskDelta
             bool backup = record != null && Directory.Exists(record.Backup);
             restore.Enabled = release.Enabled = !busy && backup;
             if (record == null)
-                paths.Text = "迁移后会保留 C 盘备份。验证软件可用后，可在这里恢复原目录或释放备份。";
+                paths.Text = "暂无迁移记录";
             else
                 paths.Text = "源：" + record.Source + "\n目标：" + record.Target + "\n原盘备份：" + (backup ? record.Backup : "无");
             tips.SetToolTip(paths, paths.Text + (record != null && Directory.Exists(record.Staging) ? "\n暂存：" + record.Staging : ""));

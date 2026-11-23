@@ -9,6 +9,13 @@ using System.Xml.Serialization;
 
 namespace DiskDelta
 {
+    internal sealed class SnapshotComparison
+    {
+        public Report Report;
+        public DirectoryTree Tree;
+        public bool LegacyTree;
+    }
+
     internal sealed class History
     {
         private static readonly XmlSerializer Serializer = new XmlSerializer(typeof(Report));
@@ -38,6 +45,52 @@ namespace DiskDelta
         public IEnumerable<DirectoryChange> ReadTree(Report report)
         {
             return Scanner.ReadDirectoryChanges(TreePath(report.Id));
+        }
+
+        public bool CanCompareFiles(Report earlier, Report later)
+        {
+            return later.Baseline == earlier.Started ||
+                (File.Exists(SnapshotPath(earlier.Id)) && File.Exists(SnapshotPath(later.Id)));
+        }
+
+        public SnapshotComparison CompareFiles(Report earlier, Report later)
+        {
+            if (earlier.Root != later.Root || string.CompareOrdinal(earlier.Id, later.Id) >= 0 ||
+                !IsId(earlier.Id) || !IsId(later.Id) || !CanCompareFiles(earlier, later))
+                throw new IOException("所选快照的文件明细不可用。");
+
+            if (later.Baseline == earlier.Started)
+            {
+                try
+                {
+                    if (File.Exists(TreePath(later.Id)) || RebuildTree(later))
+                        return new SnapshotComparison { Report = later, Tree = new DirectoryTree(later.Root, ReadTree(later)) };
+                }
+                catch (IOException) { }
+                catch (InvalidDataException) { }
+                return new SnapshotComparison { Report = later, Tree = DirectoryTree.FromLegacy(later), LegacyTree = true };
+            }
+
+            using (new FileStream(Path.Combine(DirectoryPath, "scan.lock"), FileMode.OpenOrCreate, FileAccess.Write, FileShare.None))
+            {
+                string temp = Path.Combine(DirectoryPath, "pair-tree.tmp");
+                var report = new Report
+                {
+                    Root = later.Root, VolumeId = later.VolumeId, Id = later.Id, Started = later.Started,
+                    Capacity = later.Capacity, Free = later.Free, Files = later.Files, Unreadable = later.Unreadable,
+                    Links = later.Links, Baseline = earlier.Started, BaselineFree = earlier.Free,
+                    BaselineCapacity = earlier.Capacity, BaselineUnreadable = earlier.Unreadable
+                };
+                try
+                {
+                    Scanner.Compare(SnapshotPath(earlier.Id), SnapshotPath(later.Id), temp, report, CancellationToken.None);
+                    return new SnapshotComparison
+                    {
+                        Report = report, Tree = new DirectoryTree(report.Root, Scanner.ReadDirectoryChanges(temp))
+                    };
+                }
+                finally { TryDelete(temp); }
+            }
         }
 
         public bool RebuildTree(Report report)
@@ -132,6 +185,7 @@ namespace DiskDelta
                         Scanner.Compare(SnapshotPath(baseline.Id), temporarySnapshot, temporaryTree, report, cancellation);
                         report.Baseline = baseline.Started;
                         report.BaselineFree = baseline.Free;
+                        report.BaselineCapacity = baseline.Capacity;
                         report.BaselineUnreadable = baseline.Unreadable;
                     }
 

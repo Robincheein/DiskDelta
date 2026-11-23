@@ -181,7 +181,7 @@ namespace DiskDelta
                 foreach (var group in entry.Locations.OrderBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
                     .GroupBy(item => !item.Value.StartsWith("匹配线索", StringComparison.Ordinal)).OrderByDescending(item => item.Key))
                 {
-                    TreeNode category = paths.Nodes.Add(group.Key ? "登记位置" : "名称匹配线索 · 请核对归属");
+                    TreeNode category = paths.Nodes.Add(group.Key ? "登记位置" : "同名匹配");
                     foreach (var location in group)
                         category.Nodes.Add(CreateLocation(location.Key, location.Key, location.Value));
                     category.Expand();
@@ -214,7 +214,7 @@ namespace DiskDelta
                 foreach (string path in Directory.EnumerateFileSystemEntries(directory))
                     node.Nodes.Add(CreateLocation(path, Path.GetFileName(path)));
             }
-            catch (IOException) { node.Nodes.Add("目录不存在、无法读取或是联接。"); }
+            catch (IOException) { node.Nodes.Add("目录不可用"); }
             catch (UnauthorizedAccessException) { node.Nodes.Add("目录访问受限。"); }
         }
 

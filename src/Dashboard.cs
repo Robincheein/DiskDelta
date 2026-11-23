@@ -41,14 +41,13 @@ namespace DiskDelta
         private TableLayoutPanel page;
         private TableLayoutPanel header;
         private TableLayoutPanel cards;
-        private bool maintenanceActive;
         private readonly Metric disk = new Metric("磁盘可用", true);
         private readonly Metric change = new Metric("磁盘占用净变化", false);
         private readonly Metric visible = new Metric("文件增长合计", false);
         private readonly Panel results = new Panel { BackColor = Color.White, Dock = DockStyle.Fill };
         private readonly DataGridView files = Grid();
         private readonly DataGridView folders = Grid();
-        private readonly DataGridView dates = Grid();
+        private readonly HistoryView timeline = new HistoryView { Dock = DockStyle.Fill };
         private readonly Label empty = Label("", 11, Muted);
         private readonly Label viewHint = Label("", 9, Muted);
         private readonly Button[] viewButtons =
@@ -61,11 +60,17 @@ namespace DiskDelta
         private readonly SoftwareView software = new SoftwareView { Dock = DockStyle.Fill };
         private readonly System.Windows.Forms.Timer refresh = new System.Windows.Forms.Timer { Interval = 20000 };
         private Report selected;
+        private string latestReportId;
+        private SnapshotComparison comparison;
         private DailySchedule.Status scheduleStatus;
         private CancellationTokenSource scanning;
         private DateTime lastWrite;
         private int activeView;
         private bool closing;
+        private readonly NotifyIcon tray = new NotifyIcon { Text = "磁盘日记" };
+        private readonly ContextMenuStrip trayMenu = new ContextMenuStrip();
+        private bool leaving;
+        private FormWindowState lastWindowState = FormWindowState.Normal;
         private int tableDpi = BaseDpi;
         private bool layoutReady;
         private string treeReportId;
@@ -85,6 +90,7 @@ namespace DiskDelta
             Text = "磁盘日记";
             using (Icon icon = Icon.ExtractAssociatedIcon(typeof(Program).Assembly.Location))
                 if (icon != null) Icon = (Icon)icon.Clone();
+            ConfigureTray();
             BackColor = Canvas;
             ForeColor = Ink;
             Font = new Font("Microsoft YaHei UI", 9F);
@@ -125,10 +131,19 @@ namespace DiskDelta
             };
             FormClosing += delegate(object sender, FormClosingEventArgs e)
             {
+                if (e.CloseReason == CloseReason.WindowsShutDown || e.CloseReason == CloseReason.TaskManagerClosing) return;
+                if (e.CloseReason == CloseReason.UserClosing && tray.Visible && !leaving)
+                {
+                    e.Cancel = true;
+                    Hide();
+                    return;
+                }
                 if (cleanup.Mutating || migration.Mutating)
                 {
                     e.Cancel = true;
-                    state.Text = "清理或迁移操作正在完成，可以先最小化。";
+                    leaving = false;
+                    ShowWindow();
+                    state.Text = "操作进行中";
                     return;
                 }
                 if (scanning == null) return;
@@ -136,7 +151,22 @@ namespace DiskDelta
                 closing = true;
                 scanning.Cancel();
             };
-            FormClosed += delegate { refresh.Dispose(); tips.Dispose(); };
+            Resize += delegate
+            {
+                if (WindowState == FormWindowState.Minimized)
+                {
+                    if (tray.Visible && !leaving) Hide();
+                }
+                else lastWindowState = WindowState;
+            };
+            FormClosed += delegate
+            {
+                tray.Visible = false;
+                tray.Dispose();
+                trayMenu.Dispose();
+                refresh.Dispose();
+                tips.Dispose();
+            };
         }
 
         protected override void OnLoad(EventArgs e)
@@ -192,13 +222,78 @@ namespace DiskDelta
             return (int)Math.Round(units * tableDpi / (double)BaseDpi);
         }
 
+        private string TrayPreference { get { return Path.Combine(dataPath, "tray.enabled"); } }
+
+        private void ConfigureTray()
+        {
+            tray.Icon = Icon ?? SystemIcons.Application;
+            trayMenu.Items.Add("打开磁盘日记", null, delegate { ShowWindow(); });
+            trayMenu.Items.Add("设置", null, delegate { ShowWindow(); EditSettings(); });
+            trayMenu.Items.Add(new ToolStripSeparator());
+            trayMenu.Items.Add("退出", null, delegate { leaving = true; Close(); });
+            tray.ContextMenuStrip = trayMenu;
+            tray.DoubleClick += delegate { ShowWindow(); };
+            tray.Visible = File.Exists(TrayPreference);
+        }
+
+        public void ShowWindow()
+        {
+            if (IsDisposed) return;
+            if (!Visible) Show();
+            if (WindowState == FormWindowState.Minimized) WindowState = lastWindowState;
+            Activate();
+        }
+
+        private void EditSettings()
+        {
+            using (var dialog = new Form
+            {
+                Text = "设置", Font = Font, BackColor = Color.White, ClientSize = new Size(346, 116),
+                FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent,
+                MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false
+            })
+            {
+                var enabled = new CheckBox
+                {
+                    Text = "关闭或最小化时留在系统托盘", Checked = tray.Visible, AutoSize = true,
+                    Location = new Point(17, 19)
+                };
+                var save = Button("保存", true);
+                save.SetBounds(228, 58, 100, 35);
+                save.DialogResult = DialogResult.OK;
+                var cancel = Button("取消", false);
+                cancel.SetBounds(122, 58, 100, 35);
+                cancel.DialogResult = DialogResult.Cancel;
+                dialog.AcceptButton = save;
+                dialog.CancelButton = cancel;
+                dialog.Controls.AddRange(new Control[] { enabled, save, cancel });
+                dialog.AutoScaleDimensions = new SizeF(BaseDpi, BaseDpi);
+                dialog.AutoScaleMode = AutoScaleMode.Dpi;
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                try { SetTray(enabled.Checked); }
+                catch (IOException ex) { MessageBox.Show(this, ex.Message, "设置未保存"); }
+                catch (UnauthorizedAccessException ex) { MessageBox.Show(this, ex.Message, "设置未保存"); }
+            }
+        }
+
+        private void SetTray(bool enabled)
+        {
+            if (enabled)
+            {
+                Directory.CreateDirectory(dataPath);
+                File.WriteAllText(TrayPreference, "");
+            }
+            else if (File.Exists(TrayPreference)) File.Delete(TrayPreference);
+            tray.Visible = enabled;
+        }
+
         private void ScaleTables(int dpi)
         {
             if (tableDpi == dpi) return;
             tableDpi = dpi;
             int height = TablePixels(GridRowHeight);
             var padding = new Padding(TablePixels(7), 0, TablePixels(7), 0);
-            foreach (DataGridView grid in new[] { folders, files, dates })
+            foreach (DataGridView grid in new[] { folders, files, timeline.Records })
             {
                 grid.ColumnHeadersHeight = TablePixels(GridHeaderHeight);
                 grid.ColumnHeadersDefaultCellStyle.Padding = padding;
@@ -206,8 +301,8 @@ namespace DiskDelta
                 grid.RowTemplate.Height = height;
                 foreach (DataGridViewColumn column in grid.Columns)
                 {
-                    column.MinimumWidth = TablePixels(65);
                     int width = (int)column.Tag;
+                    column.MinimumWidth = TablePixels(width > 0 ? Math.Min(width, 65) : 65);
                     if (width > 0) column.Width = TablePixels(width);
                 }
                 if (grid.VirtualMode)
@@ -296,14 +391,19 @@ namespace DiskDelta
             viewHint.Dock = DockStyle.Fill;
             viewHint.TextAlign = ContentAlignment.MiddleRight;
             viewHint.AutoEllipsis = true;
+            var settings = Button("设置", false);
+            settings.Dock = DockStyle.Right;
+            settings.Width = 68;
+            settings.Click += delegate { EditSettings(); };
             toolbar.Controls.Add(viewHint);
             toolbar.Controls.Add(segmented);
+            toolbar.Controls.Add(settings);
             content.Controls.Add(toolbar, 0, 0);
             content.Controls.Add(results, 0, 1);
             page.Controls.Add(content, 0, 2);
             empty.Dock = DockStyle.Fill;
             empty.TextAlign = ContentAlignment.MiddleCenter;
-            results.Controls.AddRange(new Control[] { files, folders, dates, empty, cleanup, migration, software });
+            results.Controls.AddRange(new Control[] { files, folders, timeline, empty, cleanup, migration, software });
 
             var footer = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
             state.Dock = DockStyle.Fill;
@@ -328,26 +428,15 @@ namespace DiskDelta
             Column(files, "当前大小", 114);
             Column(files, "文件路径", 0);
             ConfigureFolderTree();
-            Column(dates, "扫描时间", 171);
-            Column(dates, "磁盘可用", 119);
-            Column(dates, "占用净变化", 126);
-            Column(dates, "文件增长", 119);
-            Column(dates, "对照快照", 0);
-            dates.CellDoubleClick += delegate(object sender, DataGridViewCellEventArgs e)
+            timeline.OpenSaved += delegate(Report report)
             {
-                if (e.RowIndex < 0) return;
-                selected = (Report)dates.Rows[e.RowIndex].Tag;
+                comparison = null;
+                selected = report;
+                treeReportId = null;
                 Display();
                 SetView(0);
             };
-            dates.KeyDown += delegate(object sender, KeyEventArgs e)
-            {
-                if (e.KeyCode != Keys.Enter || dates.CurrentRow == null) return;
-                e.Handled = e.SuppressKeyPress = true;
-                selected = (Report)dates.CurrentRow.Tag;
-                Display();
-                SetView(0);
-            };
+            timeline.OpenComparison += async delegate(Report earlier, Report later) { await OpenComparison(earlier, later); };
             AttachPathActions(files, false, index => (string)files.Rows[index].Tag);
         }
 
@@ -448,6 +537,16 @@ namespace DiskDelta
 
         private void LoadFolders()
         {
+            if (comparison != null)
+            {
+                if (tree == comparison.Tree) return;
+                tree = comparison.Tree;
+                treeReportId = null;
+                legacyTree = comparison.LegacyTree;
+                rebuildHint = legacyTree ? "旧版记录" : null;
+                ShowFolderRows();
+                return;
+            }
             if (selected == null || selected.Baseline == default(DateTime))
             {
                 treeReportId = null;
@@ -466,6 +565,11 @@ namespace DiskDelta
             rebuildHint = null;
             tree = saved ?? DirectoryTree.FromLegacy(selected);
             treeReportId = selected.Id;
+            ShowFolderRows();
+        }
+
+        private void ShowFolderRows()
+        {
             tree.Visible(folderRows);
             folders.RowCount = folderRows.Count;
             folders.Invalidate();
@@ -473,7 +577,7 @@ namespace DiskDelta
 
         private async void CheckLegacyTree()
         {
-            if (!legacyTree || !Visible || selected == null) return;
+            if (comparison != null || !legacyTree || !Visible || selected == null) return;
             var requested = selected;
             var store = history;
             if (rebuildPending != null || !rebuildAttempted.Add(requested.Id)) return;
@@ -493,7 +597,7 @@ namespace DiskDelta
             }
             catch (Exception) { message = "旧快照无法读取"; }
             rebuildPending = null;
-            if (IsDisposed || history != store || selected == null || selected.Id != requested.Id) return;
+            if (IsDisposed || comparison != null || history != store || selected == null || selected.Id != requested.Id) return;
             if (restored)
             {
                 treeReportId = null;
@@ -515,31 +619,25 @@ namespace DiskDelta
             scheduleStatus = null;
             scheduleButton.Text = "每日扫描";
             selected = null;
+            comparison = null;
             treeReportId = null;
-            LoadHistory(true);
+            LoadHistory(true, true);
             if (Visible) await ReadSchedule();
         }
 
-        private void LoadHistory(bool newest)
+        private void LoadHistory(bool newest, bool resetTimeline = false)
         {
             string id = selected == null ? null : selected.Id;
-            bool wasNewest = dates.Rows.Count > 0 && dates.Rows[0].Tag == selected;
+            bool wasNewest = id != null && id == latestReportId;
             try
             {
                 List<Report> reports = history.LoadFor(volume.Root, volume.Id);
+                latestReportId = reports.Count == 0 ? null : reports[0].Id;
                 lastWrite = Directory.GetLastWriteTimeUtc(history.DirectoryPath);
                 selected = newest || wasNewest ? reports.FirstOrDefault() :
                     reports.FirstOrDefault(report => report.Id == id) ?? reports.FirstOrDefault();
-                dates.Rows.Clear();
-                foreach (Report report in reports)
-                {
-                    bool compared = report.Baseline != default(DateTime);
-                    int index = dates.Rows.Add(Date(report.Started), Bytes(report.Free),
-                        compared ? Signed(report.BaselineFree - report.Free) : "—",
-                        compared ? Bytes(report.Growth) : "—", compared ? Date(report.Baseline) : "初始快照");
-                    dates.Rows[index].Tag = report;
-                }
-                dates.ClearSelection();
+                if (newest) comparison = null;
+                timeline.ShowReports(history, reports, resetTimeline);
                 Display();
             }
             catch (Exception ex)
@@ -548,11 +646,30 @@ namespace DiskDelta
             }
         }
 
+        private async Task OpenComparison(Report earlier, Report later)
+        {
+            History source = history;
+            timeline.SetWorking(true, "正在对比快照…");
+            string feedback = "";
+            try
+            {
+                var result = await Task.Run(() => source.CompareFiles(earlier, later));
+                if (IsDisposed || source != history) return;
+                comparison = result;
+                selected = later;
+                Display();
+                if (activeView == 2) SetView(0);
+            }
+            catch (Exception ex) { feedback = ex.Message; }
+            finally { if (!IsDisposed) timeline.SetWorking(false, source == history ? feedback : ""); }
+        }
+
         private void Display()
         {
             files.Rows.Clear();
-            bool hasBaseline = selected != null && selected.Baseline != default(DateTime);
-            if (selected == null)
+            Report report = comparison == null ? selected : comparison.Report;
+            bool hasBaseline = report != null && report.Baseline != default(DateTime);
+            if (report == null)
             {
                 period.Text = volume.Letter + "  ·  等待首次扫描";
                 try
@@ -564,18 +681,19 @@ namespace DiskDelta
             }
             else
             {
-                period.Text = hasBaseline ? Date(selected.Baseline) + "  →  " + Date(selected.Started) :
-                    "初始快照 · " + Date(selected.Started);
-                SetDisk(selected.Free, selected.Capacity, "快照 · ");
+                period.Text = hasBaseline ? Date(report.Baseline) + "  →  " + Date(report.Started) :
+                    "初始快照 · " + Date(report.Started);
+                SetDisk(report.Free, report.Capacity, "");
             }
 
             if (hasBaseline)
             {
-                long physicalChange = selected.BaselineFree - selected.Free;
-                change.Set(Signed(physicalChange), "按 " + volume.Letter + " 可用空间计算", physicalChange > 0 ? Rise : Accent);
-                visible.Set(Bytes(selected.Growth), string.Format("新增 {0:N0} · 增大 {1:N0}", selected.Added, selected.Expanded));
-                tips.SetToolTip(visible, "只合计新增和增大的文件。可比较文件的逻辑大小净变化为 " + Signed(selected.Net) + "。");
-                foreach (Change item in selected.FileChanges)
+                long baselineCapacity = report.BaselineCapacity > 0 ? report.BaselineCapacity : report.Capacity;
+                long physicalChange = (report.Capacity - report.Free) - (baselineCapacity - report.BaselineFree);
+                change.Set(Signed(physicalChange), volume.Letter + " 占用", physicalChange > 0 ? Rise : Accent);
+                visible.Set(Bytes(report.Growth), string.Format("新增 {0:N0} · 增大 {1:N0}", report.Added, report.Expanded));
+                tips.SetToolTip(visible, "文件逻辑大小净变化 " + Signed(report.Net));
+                foreach (Change item in report.FileChanges)
                     AddPathRow(files, item, item.Kind, Signed(item.Delta), Bytes(item.Size), item.Path);
             }
             else
@@ -601,30 +719,29 @@ namespace DiskDelta
             if (scheduledError != null)
                 state.Text = "每日扫描失败 · " + scheduledError;
             else if (selected == null)
-                state.Text = "首次扫描只建立基准，第二次扫描开始显示变化。";
+                state.Text = "";
             else
-            {
-                state.Text = string.Format("已记录 {0:N0} 个文件   ·   无法读取 {1:N0} 个目录   ·   跳过 {2:N0} 个重解析点",
-                    selected.Files, selected.Unreadable, selected.Links);
-                if (selected.BaselineUnreadable > 0)
-                    state.Text += string.Format("   ·   基准有 {0:N0} 个不可读目录", selected.BaselineUnreadable);
-            }
-            tips.SetToolTip(state, state.Text + "\n文件按逻辑大小统计。权限受限、硬链接、NTFS 元数据等会使文件合计与磁盘占用变化不同。");
+                state.Text = string.Format("{0:N0} 个文件", selected.Files);
+            tips.SetToolTip(state, selected == null ? "" : string.Format("无法读取目录 {0:N0} · 联接 {1:N0}",
+                selected.Unreadable, selected.Links));
         }
 
         private void SetView(int view)
         {
-            activeView = view;
-            bool maintenance = view >= 3;
-            if (maintenance != maintenanceActive)
+            bool showHeader = view < 3;
+            bool showCards = view < 2;
+            if (showHeader != (activeView < 3) || showCards != (activeView < 2))
             {
-                maintenanceActive = maintenance;
                 page.SuspendLayout();
-                header.Visible = cards.Visible = !maintenance;
-                page.RowStyles[0].Height = maintenance ? 0 : TablePixels(42);
-                page.RowStyles[1].Height = maintenance ? 0 : TablePixels(96);
+                header.Visible = showHeader;
+                cards.Visible = showCards;
+                page.RowStyles[0].Height = showHeader ? TablePixels(42) : 0;
+                page.RowStyles[1].Height = showCards ? TablePixels(96) : 0;
                 page.ResumeLayout(true);
             }
+            activeView = view;
+            period.Visible = view < 2;
+            state.Visible = view < 2 || scanning != null;
             for (int index = 0; index < viewButtons.Length; index++)
             {
                 viewButtons[index].BackColor = index == view ? Pale : Color.White;
@@ -634,29 +751,27 @@ namespace DiskDelta
             cleanup.Visible = view == 3;
             migration.Visible = view == 4;
             software.Visible = view == 5;
-            if (view >= 3)
+            timeline.Visible = view == 2;
+            if (view >= 2)
             {
-                files.Visible = folders.Visible = dates.Visible = empty.Visible = false;
-                viewHint.Text = view == 3 ? "当前用户缓存" : view == 4 ? "配置与缓存目录" : "跨盘查找";
+                files.Visible = folders.Visible = empty.Visible = false;
+                viewHint.Text = "";
                 if (view == 5) software.ActivateView();
                 return;
             }
             if (view == 0) LoadFolders();
-            var grid = view == 0 ? folders : view == 1 ? files : dates;
+            var grid = view == 0 ? folders : files;
             bool hasRows = grid.Rows.Count != 0;
             folders.Visible = hasRows && view == 0;
             files.Visible = hasRows && view == 1;
-            dates.Visible = hasRows && view == 2;
             empty.Visible = !hasRows;
-            viewHint.Text = view == 0 ? (legacyTree ? (rebuildHint ?? "旧快照 · 大小待恢复") : "点击 ▸ 展开") :
-                view == 1 ? "按增加量排序 · 最多 150 个" : "双击查看对应快照";
+            viewHint.Text = view == 0 && legacyTree ? (rebuildHint ?? "旧版记录") : "";
             if (view == 0 && legacyTree) CheckLegacyTree();
             if (hasRows) return;
-            empty.Text = view == 2 ? "还没有扫描记录" :
-                selected == null ? "点击「立即扫描」，建立第一份快照" :
-                selected.Baseline == default(DateTime) ? "基准已保存。再次扫描即可查看变化。" :
+            empty.Text = selected == null ? "点击「立即扫描」建立快照" :
+                comparison == null && selected.Baseline == default(DateTime) ? "等待第二次扫描" :
                 view == 1 ? "这次对比没有发现增长的文件" :
-                legacyTree ? "该记录缺少目录树，再扫描一次即可生成。" : "这次对比没有发现目录变化";
+                legacyTree ? "目录明细不可用" : "没有目录变化";
         }
 
         private async Task Scan()
@@ -668,6 +783,7 @@ namespace DiskDelta
                 return;
             }
             scanning = new CancellationTokenSource();
+            state.Visible = true;
             drives.Enabled = false;
             scanButton.Text = "取消扫描";
             progressBar.Visible = true;
@@ -826,7 +942,7 @@ namespace DiskDelta
             grid.Rows[index].Cells[cells.Length - 1].ToolTipText = item.Path;
         }
 
-        private static DataGridView Grid()
+        internal static DataGridView Grid()
         {
             var grid = new DataGridView
             {
@@ -852,7 +968,7 @@ namespace DiskDelta
             return grid;
         }
 
-        private static void Column(DataGridView grid, string caption, int width, bool accent = false)
+        internal static void Column(DataGridView grid, string caption, int width, bool accent = false)
         {
             var column = new DataGridViewTextBoxColumn
             {
@@ -886,9 +1002,9 @@ namespace DiskDelta
             };
         }
 
-        private static string Date(DateTime value) { return value.ToString("yyyy-MM-dd HH:mm"); }
+        internal static string Date(DateTime value) { return value.ToString("yyyy-MM-dd HH:mm"); }
         private static string FormatTime(TimeSpan value) { return value.ToString(@"hh\:mm", CultureInfo.InvariantCulture); }
-        private static string Signed(long value) { return (value > 0 ? "+" : value < 0 ? "−" : "") + Bytes(Math.Abs(value)); }
+        internal static string Signed(long value) { return (value > 0 ? "+" : value < 0 ? "−" : "") + Bytes(Math.Abs(value)); }
 
         internal static string Bytes(long value)
         {

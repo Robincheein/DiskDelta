@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Security.Principal;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -22,7 +23,29 @@ namespace DiskDelta
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new Dashboard(DataPath));
+            string name;
+            using (var identity = WindowsIdentity.GetCurrent())
+                name = @"Local\DiskDelta-" + identity.User.Value;
+            bool first;
+            using (var activate = new EventWaitHandle(false, EventResetMode.AutoReset, name + "-show"))
+            using (var instance = new Mutex(true, name, out first))
+            {
+                if (!first) { activate.Set(); return 0; }
+                using (var window = new Dashboard(DataPath))
+                {
+                    RegisteredWaitHandle listener = null;
+                    window.Shown += delegate
+                    {
+                        listener = ThreadPool.RegisterWaitForSingleObject(activate, delegate
+                        {
+                            try { window.BeginInvoke(new Action(window.ShowWindow)); }
+                            catch (InvalidOperationException) { }
+                        }, null, Timeout.Infinite, false);
+                    };
+                    try { Application.Run(window); }
+                    finally { if (listener != null) listener.Unregister(null); }
+                }
+            }
             return 0;
         }
 

@@ -80,6 +80,36 @@ namespace DiskDelta
             }
         }
 
+        public static FileStream OpenDuplicate(string path, Info expected, bool forDeletion)
+        {
+            SafeFileHandle handle = Open(path, GenericRead | (forDeletion ? DeleteAccess : 0), forDeletion ? 0u : 1u, false);
+            try
+            {
+                Info current = Inspect(handle);
+                if ((current.Attributes & Skip) != 0 || current.Links != 1 ||
+                    !expected.Matches(current) || !MatchesPath(handle, path) || !SingleStream(handle))
+                    throw new IOException("文件已改变，或包含额外的数据流。");
+                return new FileStream(handle, FileAccess.Read, 128 * 1024);
+            }
+            catch { handle.Dispose(); throw; }
+        }
+
+        public static bool DeleteDuplicate(FileStream stream, string path)
+        {
+            byte delete = 1;
+            return MatchesPath(stream.SafeFileHandle, path) && SingleStream(stream.SafeFileHandle) &&
+                SetFileInformationByHandle(stream.SafeFileHandle, 4, ref delete, 1);
+        }
+
+        private static bool SingleStream(SafeFileHandle handle)
+        {
+            var data = new byte[64];
+            if (!GetFileInformationByHandleEx(handle, 7, data, (uint)data.Length)) return false;
+            const string name = "::$DATA";
+            return BitConverter.ToUInt32(data, 0) == 0 && BitConverter.ToInt32(data, 4) == name.Length * 2 &&
+                Encoding.Unicode.GetString(data, 24, name.Length * 2) == name;
+        }
+
         public static void CreateDirectory(string path)
         {
             if (!CreateDirectoryNative(Extended(path), IntPtr.Zero)) throw Error("无法新建目录", path);
@@ -216,6 +246,8 @@ namespace DiskDelta
             uint disposition, uint flags, IntPtr template);
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool GetFileInformationByHandle(SafeFileHandle file, out Info info);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetFileInformationByHandleEx(SafeFileHandle file, int kind, byte[] info, uint length);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern uint GetFinalPathNameByHandleW(SafeFileHandle file, StringBuilder path, uint length, uint flags);
         [DllImport("kernel32.dll", SetLastError = true)]

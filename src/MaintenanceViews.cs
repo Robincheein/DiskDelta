@@ -74,6 +74,8 @@ namespace DiskDelta
         private readonly Button scan = MaintenanceView.Action("扫描项目", true);
         private readonly Button apply = MaintenanceView.Action("清理勾选项");
         private readonly Button system = MaintenanceView.Action("Windows 磁盘清理");
+        private readonly Button duplicates = MaintenanceView.Action("查找重复文件");
+        private readonly Button recycle = MaintenanceView.Action("打开回收站");
         private readonly Label status = MaintenanceView.Note("");
         private readonly Label details = MaintenanceView.Note("");
         private readonly TreeView files = MaintenanceView.Tree();
@@ -92,15 +94,25 @@ namespace DiskDelta
 
         public CleanupView(string localAppData)
         {
-            cleaner = new Cleanup(localAppData);
+            cleaner = new Cleanup(localAppData,
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows));
             var main = MaintenanceView.Layout(37, 0, 24);
             Controls.Add(main);
-            main.Controls.Add(MaintenanceView.Actions(scan, apply, system), 0, 0);
+            main.Controls.Add(MaintenanceView.Actions(scan, apply, duplicates, system), 0, 0);
             main.Controls.Add(split, 0, 1);
             main.Controls.Add(status, 0, 2);
             split.Panel1.Controls.Add(list);
-            var preview = MaintenanceView.Layout(72, 0);
-            preview.Controls.Add(details, 0, 0);
+            var preview = MaintenanceView.Layout(78, 0);
+            var previewHeader = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+            previewHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            previewHeader.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            previewHeader.Controls.Add(details, 0, 0);
+            recycle.Anchor = AnchorStyles.Right;
+            recycle.Visible = false;
+            previewHeader.Controls.Add(recycle, 1, 0);
+            preview.Controls.Add(previewHeader, 0, 0);
             preview.Controls.Add(files, 0, 1);
             split.Panel2.Controls.Add(preview);
 
@@ -111,7 +123,7 @@ namespace DiskDelta
             });
             list.Columns.Add(new DataGridViewTextBoxColumn
             {
-                HeaderText = "文件", Width = 62, ReadOnly = true,
+                HeaderText = "数量", Width = 62, ReadOnly = true,
                 DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleRight }
             });
             list.Columns.Add(new DataGridViewTextBoxColumn
@@ -147,7 +159,21 @@ namespace DiskDelta
             scan.Click += async delegate { await Scan(); };
             apply.Click += async delegate { await Apply(); };
             system.Click += delegate { OpenDiskCleanup(); };
+            duplicates.Click += delegate
+            {
+                using (var dialog = new DuplicatesWindow(Font)) dialog.ShowDialog(this);
+            };
+            recycle.Click += delegate
+            {
+                try { RecycleBin.Open(); }
+                catch (Exception ex) { status.Text = ex.Message; }
+            };
             files.BeforeExpand += delegate(object sender, TreeViewCancelEventArgs args) { Populate(args.Node); };
+            files.NodeMouseDoubleClick += delegate(object sender, TreeNodeMouseClickEventArgs args) { LoadMore(args.Node); };
+            files.KeyDown += delegate(object sender, KeyEventArgs args)
+            {
+                if (args.KeyCode == Keys.Enter && LoadMore(files.SelectedNode)) args.Handled = args.SuppressKeyPress = true;
+            };
             ConfigureFileMenu();
             ShowResults(cleaner.Options());
             apply.Enabled = false;
@@ -195,13 +221,13 @@ namespace DiskDelta
         private IEnumerable<CleanupGroup> Selected()
         {
             return list.Rows.Cast<DataGridViewRow>().Where(row => object.Equals(row.Cells[0].Value, true))
-                .Select(row => (CleanupGroup)row.Tag).Where(item => item != null && item.Files.Count > 0);
+                .Select(row => (CleanupGroup)row.Tag).Where(item => item != null && item.Count > 0);
         }
 
         private void Busy(bool value)
         {
             busy = value;
-            scan.Enabled = list.Enabled = system.Enabled = !busy;
+            scan.Enabled = list.Enabled = system.Enabled = duplicates.Enabled = recycle.Enabled = !busy;
             apply.Enabled = !busy && Selected().Any();
         }
 
@@ -211,11 +237,11 @@ namespace DiskDelta
             status.Text = "正在扫描清理项目…";
             try
             {
-                var groups = await Task.Run(() => cleaner.Scan());
+                var groups = await ReadGroups();
                 if (IsDisposed) return;
                 hasScan = true;
                 ShowResults(groups);
-                status.Text = "共找到 " + groups.Sum(item => item.Files.Count).ToString("N0") + " 个文件 · " +
+                status.Text = "共找到 " + groups.Sum(item => item.Count).ToString("N0") + " 项 · " +
                     Dashboard.Bytes(groups.Sum(item => item.Bytes));
             }
             catch (Exception ex) { if (!IsDisposed) status.Text = "扫描失败 · " + ex.Message; }
@@ -225,27 +251,49 @@ namespace DiskDelta
         private async Task Apply()
         {
             var chosen = Selected().ToList();
+            bool emptyBin = chosen.Any(group => group.IsRecycleBin);
+            int fileCount = chosen.Sum(group => group.Files.Count);
+            string prompt = fileCount > 0 ? "永久删除勾选类别中预览的 " + fileCount.ToString("N0") + " 个文件？" : "";
+            if (emptyBin) prompt += (fileCount > 0 ? "\n\n" : "") + "清空整个 Windows 回收站将另外弹出系统确认。";
             if (chosen.Count == 0 || !MaintenanceView.Confirm(this,
-                "删除勾选类别中预览的 " + chosen.Sum(item => item.Files.Count).ToString("N0") +
-                " 个文件？文件将直接删除以释放空间。", "确认清理")) return;
+                prompt, "确认清理")) return;
             Mutating = true;
             Busy(true);
             status.Text = "正在清理勾选项…";
             try
             {
+                string binStatus = "";
+                if (emptyBin)
+                {
+                    try { binStatus = RecycleBin.Empty(Handle) ? " · 已清空回收站" : " · 已取消清空回收站"; }
+                    catch (Exception ex) { binStatus = " · 回收站清理失败 " + ex.Message; }
+                }
                 var result = await Task.Run(() => Cleanup.Apply(chosen));
-                var groups = await Task.Run(() => cleaner.Scan());
+                var groups = await ReadGroups();
                 if (IsDisposed) return;
                 ShowResults(groups);
-                status.Text = "已删除 " + result.Deleted.ToString("N0") + " 个文件 · " + Dashboard.Bytes(result.Bytes) +
-                    "（逻辑大小） · 跳过 " + result.Skipped.ToString("N0") + " 个";
+                status.Text = (fileCount > 0 ? "已删除 " + result.Deleted.ToString("N0") + " 个文件 · " + Dashboard.Bytes(result.Bytes) +
+                    "（逻辑大小） · 跳过 " + result.Skipped.ToString("N0") + " 个" + binStatus :
+                    binStatus.TrimStart(' ', '·'));
             }
             catch (Exception ex) { if (!IsDisposed) status.Text = "清理中断 · " + ex.Message; }
             finally { Mutating = false; if (!IsDisposed) Busy(false); }
         }
 
+        private async Task<List<CleanupGroup>> ReadGroups()
+        {
+            var binTask = RecycleBin.ScanAsync();
+            var groups = await Task.Run(() => cleaner.Scan());
+            var bin = groups.First(group => group.IsRecycleBin);
+            try { bin.Recycle = await binTask; }
+            catch (Exception ex) { bin.Description += "\n读取回收站失败 · " + ex.Message; }
+            return groups;
+        }
+
         private void ShowResults(IEnumerable<CleanupGroup> groups)
         {
+            var active = list.CurrentRow == null ? null : list.CurrentRow.Tag as CleanupGroup;
+            DataGridViewRow previewRow = null, firstResult = null;
             list.SuspendLayout();
             list.Rows.Clear();
             try
@@ -262,12 +310,15 @@ namespace DiskDelta
                     heading.DefaultCellStyle.SelectionForeColor = MaintenanceView.Green;
                     foreach (CleanupGroup group in category)
                     {
-                        int index = list.Rows.Add(false, group.Name, hasScan ? group.Files.Count.ToString("N0") : "—",
-                            hasScan ? Dashboard.Bytes(group.Bytes) : "—");
+                        bool scanned = hasScan && (!group.IsRecycleBin || group.Recycle != null);
+                        int index = list.Rows.Add(false, group.Name, scanned ? group.Count.ToString("N0") : "—",
+                            scanned ? Dashboard.Bytes(group.Bytes) : "—");
                         DataGridViewRow row = list.Rows[index];
                         row.Tag = group;
-                        row.Cells[0].ReadOnly = !hasScan || group.Files.Count == 0;
+                        row.Cells[0].ReadOnly = !hasScan || group.Count == 0;
                         row.Cells[1].ToolTipText = group.Description;
+                        if (firstResult == null && group.Count > 0) firstResult = row;
+                        if (active != null && active.Name == group.Name) previewRow = row;
                     }
                 }
             }
@@ -275,6 +326,12 @@ namespace DiskDelta
             list.ClearSelection();
             split.Panel2Collapsed = true;
             files.Nodes.Clear();
+            var selected = previewRow ?? firstResult;
+            if (selected != null)
+            {
+                list.CurrentCell = selected.Cells[1];
+                ShowGroup((CleanupGroup)selected.Tag);
+            }
         }
 
         private void ShowGroup(CleanupGroup group)
@@ -285,12 +342,20 @@ namespace DiskDelta
                 split.Panel2Collapsed = false;
                 split.SplitterDistance = split.Width * 48 / 100;
             }
-            details.Text = group.Description + "\n" + group.Days + " 天以上" + (hasScan ?
-                " · " + group.Files.Count.ToString("N0") + " 个文件 · " + Dashboard.Bytes(group.Bytes) : "");
+            recycle.Visible = group.IsRecycleBin;
+            string counts = group.Count.ToString("N0") + (group.IsRecycleBin ? " 项" : " 个文件") + " · " + Dashboard.Bytes(group.Bytes);
+            details.Text = group.Description + (group.IsRecycleBin ?
+                (group.Recycle == null ? "" : "\n" + counts) :
+                "\n" + group.Days + " 天以上" + (hasScan ? " · " + counts : ""));
             files.BeginUpdate();
             try
             {
                 files.Nodes.Clear();
+                if (group.IsRecycleBin)
+                {
+                    if (group.Recycle != null) ShowRecycle(group.Recycle);
+                    return;
+                }
                 foreach (var root in group.Files.GroupBy(item => item.Root))
                 {
                     var directory = new PreviewDirectory();
@@ -304,8 +369,42 @@ namespace DiskDelta
                     }
                     files.Nodes.Add(Node(caption, root.Key, directory));
                 }
+                ExpandPreview();
             }
             finally { files.EndUpdate(); }
+        }
+
+        private void ShowRecycle(RecycleSnapshot snapshot)
+        {
+            foreach (var group in snapshot.Entries.GroupBy(item => string.IsNullOrEmpty(item.Parent) ? "原位置未知" : item.Parent)
+                .OrderBy(item => item.Key, StringComparer.CurrentCultureIgnoreCase))
+            {
+                var node = new TreeNode(group.Key) { ToolTipText = group.Key };
+                foreach (RecycleEntry entry in group.OrderBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase))
+                    node.Nodes.Add(new TreeNode(entry.Name + (entry.IsDirectory ? "  ·  文件夹" :
+                        "  ·  " + Dashboard.Bytes(entry.Bytes))));
+                files.Nodes.Add(node);
+                node.Expand();
+            }
+            if (snapshot.Entries.Count < snapshot.Count)
+                files.Nodes.Add("更多项目可在 Windows 回收站中查看");
+        }
+
+        private void ExpandPreview()
+        {
+            const int initialNodes = 700;
+            var queue = new Queue<TreeNode>(files.Nodes.Cast<TreeNode>());
+            int visible = queue.Count;
+            while (queue.Count > 0 && visible < initialNodes)
+            {
+                var node = queue.Dequeue();
+                Populate(node);
+                node.Expand();
+                visible += node.Nodes.Count;
+                foreach (TreeNode child in node.Nodes)
+                    if (child.Nodes.Count > 0) queue.Enqueue(child);
+            }
+            if (files.Nodes.Count > 0) files.TopNode = files.Nodes[0];
         }
 
         private sealed class PreviewDirectory
@@ -334,6 +433,12 @@ namespace DiskDelta
             public PreviewDirectory Children;
         }
 
+        private sealed class PreviewPage
+        {
+            public CleanupFile[] Items;
+            public int Offset;
+        }
+
         private static TreeNode Node(string name, string path, PreviewDirectory directory)
         {
             var node = new TreeNode(name)
@@ -353,11 +458,33 @@ namespace DiskDelta
             node.Nodes.Clear();
             foreach (var branch in directory.Directories.OrderBy(entry => entry.Key, StringComparer.CurrentCultureIgnoreCase))
                 node.Nodes.Add(Node(branch.Key, Path.Combine(item.Path, branch.Key), branch.Value));
-            foreach (CleanupFile file in directory.Items.OrderBy(entry => entry.Path, StringComparer.CurrentCultureIgnoreCase))
+            AddPage(node, new PreviewPage { Items = directory.Items.OrderBy(entry => entry.Path, StringComparer.CurrentCultureIgnoreCase).ToArray() });
+        }
+
+        private static bool LoadMore(TreeNode node)
+        {
+            var page = node == null ? null : node.Tag as PreviewPage;
+            if (page == null) return false;
+            TreeNode parent = node.Parent;
+            node.Remove();
+            AddPage(parent, page);
+            if (parent.Nodes.Count > 0) parent.TreeView.SelectedNode = parent.Nodes[parent.Nodes.Count - 1];
+            return true;
+        }
+
+        private static void AddPage(TreeNode node, PreviewPage page)
+        {
+            int end = Math.Min(page.Items.Length, page.Offset + 200);
+            for (; page.Offset < end; page.Offset++)
+            {
+                CleanupFile file = page.Items[page.Offset];
                 node.Nodes.Add(new TreeNode(Path.GetFileName(file.Path) + "  ·  " + Dashboard.Bytes(file.Info.Size))
                 {
                     ToolTipText = file.Path, Tag = new PathItem { Path = file.Path }
                 });
+            }
+            if (page.Offset < page.Items.Length)
+                node.Nodes.Add(new TreeNode("双击显示更多文件…") { Tag = page });
         }
     }
 

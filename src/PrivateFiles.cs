@@ -74,9 +74,9 @@ namespace DiskDelta
                     info.Created <= cutoff && MatchesPath(handle, path);
         }
 
-        internal enum CleanupCheck { Ready, Recent, Protected, Unavailable }
+        internal enum CleanupCheck { Ready, Protected, Unavailable }
 
-        public static CleanupCheck InspectCleanup(string path, long cutoff, out Info info)
+        public static CleanupCheck InspectCleanup(string path, out Info info)
         {
             info = default(Info);
             using (SafeFileHandle handle = Open(path, ReadAttributes, 7, false))
@@ -84,7 +84,7 @@ namespace DiskDelta
                 if (handle.IsInvalid || !GetFileInformationByHandle(handle, out info)) return CleanupCheck.Unavailable;
                 if ((info.Attributes & Skip) != 0 || info.Links != 1 || !MatchesPath(handle, path))
                     return CleanupCheck.Protected;
-                return info.Written > cutoff ? CleanupCheck.Recent : CleanupCheck.Ready;
+                return CleanupCheck.Ready;
             }
         }
 

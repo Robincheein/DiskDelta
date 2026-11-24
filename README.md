@@ -27,9 +27,9 @@
 
 首次进入 **安全清理** 会自动扫描，以后打开显示上次结果和时间，点 **扫描项目** 更新。点一项可看清理后的影响、实际扫描的路径、文件树和跳过原因。文件特别多时，可手动展开深层目录或双击「显示更多文件」。右键文件夹可打开，右键文件夹或文件可在资源管理器中定位并复制完整路径。
 
-清理项目包括用户 Temp、Windows Temp 中符合条件的临时文件、浏览器缓存、DirectX 着色器缓存、缩略图、图标、远程桌面位图和诊断记录。浏览器支持 Chrome、Edge、Brave、Vivaldi、Opera、Opera GX 和 Firefox。软件缓存包含 VS Code、VS Code Insiders、Cursor、Qoder 和 Discord。微信和 QQ 在支持的默认位置及固定盘根目录查找旧的 `.tmp` 和 `.temp` 文件，保留聊天数据库、附件和配置。 [BleachBit 清理规则](https://github.com/bleachbit/bleachbit/tree/master/cleaners) · [Dism++ 清理规则](https://github.com/Chuyu-Team/Dism-Multi-language/blob/master/Data.xml#L3719-L3915)
+清理项目包括用户 Temp、Windows Temp 中符合条件的临时文件、浏览器缓存、DirectX 着色器缓存、缩略图、图标、远程桌面位图和诊断记录。浏览器支持 Chrome、Edge、Brave、Vivaldi、Opera、Opera GX 和 Firefox。软件缓存包含 VS Code、VS Code Insiders、Cursor、Qoder 和 Discord。微信和 QQ 在支持的默认位置及固定盘根目录查找 `.tmp` 和 `.temp` 文件，保留聊天数据库、附件和配置。 [BleachBit 清理规则](https://github.com/bleachbit/bleachbit/tree/master/cleaners) · [Dism++ 清理规则](https://github.com/Chuyu-Team/Dism-Multi-language/blob/master/Data.xml#L3719-L3915)
 
-可重建缓存按匹配路径筛选。用户与 Windows Temp 筛选至少 7 天未修改的文件，聊天临时文件与诊断记录筛选至少 14 天未修改的文件。列表默认全不勾选，清理只执行勾选并确认的项目。程序跳过联接、硬链接、正在使用或预览后发生变化的文件。浏览器、聊天软件或其他相关应用运行时会跳过对应缓存。 [Microsoft 磁盘清理文档](https://learn.microsoft.com/windows-server/administration/windows-commands/cleanmgr)
+扫描按各项目的目录和文件类型查找候选文件，不限制创建或修改时间。列表默认全不勾选，清理只执行勾选并确认的项目。程序跳过联接、硬链接、正在使用或预览后发生变化的文件。浏览器、聊天软件或其他相关应用运行时会跳过对应缓存。
 
 **Windows 回收站** 显示当前用户跨盘的项目数、大小和按原目录组织的预览。右侧可打开 Windows 回收站，按项还原或删除。勾选该类别后，清空整个回收站会另弹 Windows 确认。**Windows 磁盘清理** 仍可用于系统提供的额外项目。 [Microsoft 磁盘清理文档](https://learn.microsoft.com/windows-server/administration/windows-commands/cleanmgr) · [Windows Shell 回收站](https://learn.microsoft.com/en-us/windows/win32/shell/functions)
 

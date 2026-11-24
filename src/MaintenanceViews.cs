@@ -98,7 +98,7 @@ namespace DiskDelta
 
         public CleanupView(string localAppData, string dataPath)
         {
-            cache = new ScanCache<CleanupSnapshot>(dataPath, "cleanup-scan-v1.bin.gz");
+            cache = new ScanCache<CleanupSnapshot>(dataPath, "cleanup-scan-v2.bin.gz");
             cleaner = new Cleanup(localAppData,
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                 Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
@@ -403,13 +403,11 @@ namespace DiskDelta
             }
             else
             {
-                if (group.Days > 0) details.Text += "\n按最后修改时间筛选 " + group.Days + " 天以前的文件。";
                 if (group.Inspection != null)
                 {
                     details.Text += "\n" + counts;
                     var skipped = new List<string>();
                     if (group.Inspection.Opened == 0) skipped.Add("未找到可读目录");
-                    if (group.Inspection.Recent > 0) skipped.Add("过新 " + group.Inspection.Recent.ToString("N0"));
                     if (group.Inspection.OtherTypes > 0) skipped.Add("类型不匹配 " + group.Inspection.OtherTypes.ToString("N0"));
                     if (group.Inspection.Excluded > 0) skipped.Add("链接或受保护 " + group.Inspection.Excluded.ToString("N0"));
                     if (group.Inspection.Unreadable > 0) skipped.Add("无法读取 " + group.Inspection.Unreadable.ToString("N0"));

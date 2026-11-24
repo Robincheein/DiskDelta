@@ -27,7 +27,6 @@ namespace DiskDelta
     {
         [DataMember] public readonly List<string> Paths = new List<string>();
         [DataMember] public int Opened;
-        [DataMember] public int Recent;
         [DataMember] public int OtherTypes;
         [DataMember] public int Excluded;
         [DataMember] public int Unreadable;
@@ -46,7 +45,6 @@ namespace DiskDelta
         public string ProfileCache;
         public bool ChromiumProfiles;
         public bool Recursive = true;
-        public int Days;
         public Func<string, bool> Accepts;
         [DataMember(IsRequired = true)] public readonly List<CleanupFile> Files = new List<CleanupFile>();
         [DataMember] public RecycleSnapshot Recycle;
@@ -80,12 +78,12 @@ namespace DiskDelta
         {
             var groups = new List<CleanupGroup>
             {
-                new CleanupGroup { Category = "临时文件与回收站", Name = "用户 Temp 临时文件", Roots = TempRoots, Days = 7,
+                new CleanupGroup { Category = "临时文件与回收站", Name = "用户 Temp 临时文件", Roots = TempRoots,
                     Description = "当前用户的 Temp 目录及 Windows 为该用户指定的临时目录。",
                     Effect = "正在安装、更新或恢复文件的软件可能仍需要临时文件。请先退出这些程序。" },
-                new CleanupGroup { Category = "临时文件与回收站", Name = "Windows Temp 临时文件", Days = 7,
+                new CleanupGroup { Category = "临时文件与回收站", Name = "Windows Temp 临时文件",
                     Roots = () => In(windows, "Temp"), Accepts = IsTemporary,
-                    Description = "Windows Temp 中可访问的旧 .tmp 和 .temp 文件。",
+                    Description = "Windows Temp 中可访问的 .tmp 和 .temp 文件。",
                     Effect = "安装或更新可能仍使用临时文件。请等它们完成后再清理。" },
                 new CleanupGroup { Category = "临时文件与回收站", Name = "Windows 回收站", IsRecycleBin = true,
                     Description = "预览当前用户在各盘的回收站。",
@@ -104,18 +102,18 @@ namespace DiskDelta
             };
             groups.Add(new CleanupGroup
             {
-                Category = "聊天软件", Name = "微信临时文件", Days = 14,
+                Category = "聊天软件", Name = "微信临时文件",
                 Apps = new[] { "Weixin", "WeChat", "WeixinAppEx", "WeChatAppEx" },
                 Roots = WeChatTemp, Accepts = IsTemporary,
-                Description = "微信临时目录中的旧 .tmp 和 .temp 文件。请先退出微信。",
+                Description = "微信临时目录中的 .tmp 和 .temp 文件。请先退出微信。",
                 Effect = "未完成的临时传输可能需要重试。聊天数据库、附件和配置保留。"
             });
             groups.Add(new CleanupGroup
             {
-                Category = "聊天软件", Name = "QQ 临时文件", Days = 14,
+                Category = "聊天软件", Name = "QQ 临时文件",
                 Apps = new[] { "QQ", "QQNT", "QQExternal" },
                 Roots = QQTemp, Accepts = IsTemporary,
-                Description = "QQ 临时目录及 WinTemp 中的旧 .tmp 和 .temp 文件。请先退出 QQ。",
+                Description = "QQ 临时目录及 WinTemp 中的 .tmp 和 .temp 文件。请先退出 QQ。",
                 Effect = "未完成的临时传输可能需要重试。聊天数据库、附件和配置保留。"
             });
             AddApplicationCache(groups, "VS Code", "Code", "Code");
@@ -135,11 +133,11 @@ namespace DiskDelta
                 Root = @"Mozilla\Firefox\Profiles", ProfileCache = "cache2",
                 Description = "Firefox 下载的网页缓存。退出浏览器后可清理。",
                 Effect = "网页资源会重新下载。登录状态、书签和历史记录保留。" });
-            groups.Add(new CleanupGroup { Category = "诊断记录", Name = "应用崩溃转储", Root = "CrashDumps", Days = 14,
+            groups.Add(new CleanupGroup { Category = "诊断记录", Name = "应用崩溃转储", Root = "CrashDumps",
                 Description = "当前用户的应用崩溃转储，用于排查故障。", Recursive = false,
                 Effect = "清理后无法用这些转储排查此前的崩溃。",
                 Accepts = name => HasExtension(name, ".dmp", ".mdmp", ".hdmp") });
-            groups.Add(new CleanupGroup { Category = "诊断记录", Name = "Windows 错误报告", Days = 14,
+            groups.Add(new CleanupGroup { Category = "诊断记录", Name = "Windows 错误报告",
                 Root = @"Microsoft\Windows\WER\ReportArchive", Description = "已归档的错误报告和诊断附件。",
                 Effect = "清理后将失去这些旧故障的本地诊断记录。",
                 Accepts = name => HasExtension(name, ".wer", ".dmp", ".mdmp", ".hdmp", ".cab") });
@@ -149,12 +147,10 @@ namespace DiskDelta
         public List<CleanupGroup> Scan()
         {
             var groups = Options();
-            DateTime now = DateTime.UtcNow;
             foreach (CleanupGroup group in groups)
             {
                 if (group.IsRecycleBin) continue;
                 group.Inspection = new CleanupInspection();
-                long cutoff = group.Days == 0 ? long.MaxValue : now.AddDays(-group.Days).ToFileTimeUtc();
                 var roots = RootsFor(group).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                 group.Inspection.Paths.AddRange(roots.Count == 0 ? BaseRootsFor(group) : roots);
                 foreach (string root in roots)
@@ -162,7 +158,7 @@ namespace DiskDelta
                     string[] initial = OpenForScan(root, group.Inspection);
                     if (initial == null) continue;
                     group.Inspection.Opened++;
-                    Walk(root, initial, cutoff, group);
+                    Walk(root, initial, group);
                 }
             }
             return groups;
@@ -239,10 +235,9 @@ namespace DiskDelta
                 }
                 var roots = new HashSet<string>(RootsFor(group), StringComparer.OrdinalIgnoreCase);
                 var removed = new HashSet<CleanupFile>();
-                long cutoff = group.Days == 0 ? long.MaxValue : DateTime.UtcNow.AddDays(-group.Days).ToFileTimeUtc();
                 foreach (CleanupFile file in group.Files)
                 {
-                    if (!roots.Contains(file.Root) || !Allowed(group, file, cutoff) ||
+                    if (!roots.Contains(file.Root) || !Allowed(group, file) ||
                         !PrivateFiles.TryDelete(file.Path, file.Info))
                     {
                         result.Skipped++;
@@ -257,9 +252,9 @@ namespace DiskDelta
             return result;
         }
 
-        private static bool Allowed(CleanupGroup group, CleanupFile file, long cutoff)
+        private static bool Allowed(CleanupGroup group, CleanupFile file)
         {
-            if (!PrivateFiles.Below(file.Path, file.Root) || file.Info.Written > cutoff)
+            if (!PrivateFiles.Below(file.Path, file.Root))
                 return false;
             try
             {
@@ -417,7 +412,7 @@ namespace DiskDelta
             };
         }
 
-        private static void Walk(string root, string[] initial, long cutoff, CleanupGroup group)
+        private static void Walk(string root, string[] initial, CleanupGroup group)
         {
             var pending = new Stack<string[]>();
             pending.Push(initial);
@@ -445,12 +440,11 @@ namespace DiskDelta
                         continue;
                     }
                     PrivateFiles.Info info;
-                    switch (PrivateFiles.InspectCleanup(path, cutoff, out info))
+                    switch (PrivateFiles.InspectCleanup(path, out info))
                     {
                         case PrivateFiles.CleanupCheck.Ready:
                             group.Files.Add(new CleanupFile { Root = root, Path = path, Info = info });
                             break;
-                        case PrivateFiles.CleanupCheck.Recent: group.Inspection.Recent++; break;
                         case PrivateFiles.CleanupCheck.Protected: group.Inspection.Excluded++; break;
                         default: group.Inspection.Unreadable++; break;
                     }

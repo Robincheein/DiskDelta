@@ -18,6 +18,8 @@ namespace DiskDelta
 
     internal sealed class History
     {
+        private const int RetainedScanDays = 30;
+        private const int RecentFullSnapshots = 4;
         private static readonly XmlSerializer Serializer = new XmlSerializer(typeof(Report));
         public readonly string DirectoryPath;
         private readonly string excluded;
@@ -213,7 +215,8 @@ namespace DiskDelta
             var days = reports.GroupBy(item => item.Started.Date).ToList();
             if (days.Count == 0)
                 return;
-            var snapshots = new HashSet<string>(StringComparer.Ordinal) { SnapshotPath(days[0].First().Id) };
+            var snapshots = new HashSet<string>(days.Take(RetainedScanDays).SelectMany(day => day)
+                .Take(RecentFullSnapshots).Select(item => SnapshotPath(item.Id)), StringComparer.Ordinal);
             if (days.Count > 1)
                 snapshots.Add(SnapshotPath(days[1].First().Id));
             else
@@ -225,14 +228,7 @@ namespace DiskDelta
                 if (!snapshots.Contains(snapshot))
                     TryDelete(snapshot);
             }
-            foreach (var day in days.Take(30))
-            {
-                // During the first day keep the original baseline as well as the latest scan.
-                foreach (Report report in day.Skip(1))
-                    if (days.Count > 1 || !snapshots.Contains(SnapshotPath(report.Id)))
-                        TryDelete(ReportPath(report.Id));
-            }
-            foreach (var day in days.Skip(30))
+            foreach (var day in days.Skip(RetainedScanDays))
                 foreach (Report report in day)
                     TryDelete(ReportPath(report.Id));
 

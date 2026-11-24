@@ -1,9 +1,7 @@
 using System;
-using System.ComponentModel;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace DiskDelta
@@ -69,8 +67,7 @@ namespace DiskDelta
             try
             {
                 File.WriteAllLines(temp, new[] { Hex(Increase), Hex(Decrease) });
-                if (!MoveFileEx(temp, path, 1))
-                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                PrivateFiles.ReplaceFile(temp, path);
             }
             finally { if (File.Exists(temp)) File.Delete(temp); }
         }
@@ -96,8 +93,5 @@ namespace DiskDelta
                 255 - (int)((255 - color.G) * amount), 255 - (int)((255 - color.B) * amount));
         }
 
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool MoveFileEx(string source, string destination, uint flags);
     }
 }

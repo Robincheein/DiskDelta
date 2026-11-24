@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Runtime.Serialization;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 
@@ -16,14 +17,19 @@ namespace DiskDelta
             FileAttributes.Offline | FileAttributes.System;
 
         [StructLayout(LayoutKind.Sequential)]
+        [DataContract]
         internal struct Info
         {
             public FileAttributes Attributes;
             public long Created { get { return Combine(CreationHigh, CreationLow); } }
             public long Written { get { return Combine(WriteHigh, WriteLow); } }
             public long Size { get { return Combine(SizeHigh, SizeLow); } }
-            public uint CreationLow, CreationHigh, AccessLow, AccessHigh, WriteLow, WriteHigh;
-            public uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+            [DataMember] public uint CreationLow, CreationHigh;
+            public uint AccessLow, AccessHigh;
+            [DataMember] public uint WriteLow, WriteHigh;
+            [DataMember] public uint Volume, SizeHigh, SizeLow;
+            public uint Links;
+            [DataMember] public uint IndexHigh, IndexLow;
 
             public bool Matches(Info current)
             {
@@ -66,6 +72,20 @@ namespace DiskDelta
                 return !handle.IsInvalid && GetFileInformationByHandle(handle, out info) &&
                     (info.Attributes & Skip) == 0 && info.Links == 1 && info.Written <= cutoff &&
                     info.Created <= cutoff && MatchesPath(handle, path);
+        }
+
+        internal enum CleanupCheck { Ready, Recent, Protected, Unavailable }
+
+        public static CleanupCheck InspectCleanup(string path, long cutoff, out Info info)
+        {
+            info = default(Info);
+            using (SafeFileHandle handle = Open(path, ReadAttributes, 7, false))
+            {
+                if (handle.IsInvalid || !GetFileInformationByHandle(handle, out info)) return CleanupCheck.Unavailable;
+                if ((info.Attributes & Skip) != 0 || info.Links != 1 || !MatchesPath(handle, path))
+                    return CleanupCheck.Protected;
+                return info.Written > cutoff ? CleanupCheck.Recent : CleanupCheck.Ready;
+            }
         }
 
         public static bool TryDelete(string path, Info expected)
@@ -113,6 +133,12 @@ namespace DiskDelta
         public static void CreateDirectory(string path)
         {
             if (!CreateDirectoryNative(Extended(path), IntPtr.Zero)) throw Error("无法新建目录", path);
+        }
+
+        public static void ReplaceFile(string source, string destination)
+        {
+            const uint replaceExisting = 1;
+            if (!MoveFileEx(source, destination, replaceExisting)) throw Error("无法保存文件", destination);
         }
 
         public static void CreateJunction(string emptyFolder, string target)
@@ -244,6 +270,9 @@ namespace DiskDelta
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security,
             uint disposition, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool MoveFileEx(string source, string destination, uint flags);
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool GetFileInformationByHandle(SafeFileHandle file, out Info info);
         [DllImport("kernel32.dll", SetLastError = true)]

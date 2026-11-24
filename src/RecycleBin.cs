@@ -4,24 +4,27 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Runtime.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace DiskDelta
 {
+    [DataContract]
     internal sealed class RecycleSnapshot
     {
-        public long Count;
-        public long Bytes;
-        public readonly List<RecycleEntry> Entries = new List<RecycleEntry>();
+        [DataMember] public long Count;
+        [DataMember] public long Bytes;
+        [DataMember(IsRequired = true)] public readonly List<RecycleEntry> Entries = new List<RecycleEntry>();
     }
 
+    [DataContract]
     internal sealed class RecycleEntry
     {
-        public string Name;
-        public string Parent;
-        public long Bytes;
-        public bool IsDirectory;
+        [DataMember] public string Name;
+        [DataMember] public string Parent;
+        [DataMember] public long Bytes;
+        [DataMember] public bool IsDirectory;
     }
 
     internal static class RecycleBin

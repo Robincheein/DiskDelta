@@ -17,14 +17,17 @@ namespace DiskDelta
         private readonly Button registry = MaintenanceView.Action("读取注册表");
         private readonly Button scan = MaintenanceView.Action("扫描所有盘符", true);
         private readonly Label status = MaintenanceView.Note("");
+        private readonly ScanCache<SoftwareCatalog.Result> cache;
         private readonly Label details = MaintenanceView.Note("从左侧选择一个软件。");
         private List<SoftwareEntry> entries = new List<SoftwareEntry>();
         private CancellationTokenSource cancellation;
         private bool started;
         private bool reading;
+        private SoftwareCatalog.Result snapshot;
 
-        public SoftwareView()
+        public SoftwareView(string dataPath)
         {
+            cache = new ScanCache<SoftwareCatalog.Result>(dataPath, "software-scan-v1.bin.gz");
             var main = MaintenanceView.Layout(34, 0, 24);
             main.Controls.Add(MaintenanceView.Actions(scan, registry), 0, 0);
             var split = new SplitContainer { Dock = DockStyle.Fill };
@@ -77,7 +80,24 @@ namespace DiskDelta
         {
             if (started) return;
             started = true;
-            await RefreshRegistry();
+            reading = true;
+            registry.Enabled = scan.Enabled = false;
+            status.Text = "正在读取上次扫描…";
+            SoftwareCatalog.Result saved = null;
+            try { saved = await Task.Run(() => cache.Read()); }
+            catch (Exception ex)
+            {
+                if (!IsDisposed) status.Text = "读取上次扫描失败 · " + ex.Message;
+                return;
+            }
+            finally
+            {
+                reading = false;
+                if (!IsDisposed) registry.Enabled = scan.Enabled = true;
+            }
+            if (IsDisposed) return;
+            if (saved != null && saved.Valid) DisplaySnapshot(saved, true);
+            else await Scan();
         }
 
         private async Task RefreshRegistry()
@@ -87,11 +107,10 @@ namespace DiskDelta
             status.Text = "正在读取应用登记信息…";
             try
             {
-                var found = await Task.Run(() => SoftwareCatalog.RegistryEntries());
+                var result = await Task.Run(() => SoftwareCatalog.UpdateRegistry(SoftwareCatalog.RegistryEntries(), snapshot));
+                bool saved = await Task.Run(() => cache.Save(result));
                 if (IsDisposed) return;
-                entries = found;
-                ApplyFilter();
-                status.Text = "已读取 " + entries.Count.ToString("N0") + " 项软件。可进一步扫描所有盘符。";
+                DisplaySnapshot(result, saved);
             }
             catch (Exception ex) { if (!IsDisposed) status.Text = "注册表扫描失败 · " + ex.Message; }
             finally
@@ -111,29 +130,36 @@ namespace DiskDelta
                 return;
             }
             cancellation = new CancellationTokenSource();
-            CancellationToken token = cancellation.Token;
+            var run = cancellation;
+            CancellationToken token = run.Token;
             scan.Text = "取消扫描";
             registry.Enabled = false;
             status.Text = "正在读取注册表并枚举盘符…";
             var progress = new Progress<string>(drive =>
             {
-                if (!IsDisposed && cancellation != null) status.Text = "正在扫描 " + drive + " …";
+                if (!IsDisposed && cancellation == run && scan.Enabled) status.Text = "正在扫描 " + drive + " …";
             });
             try
             {
-                var result = await Task.Run(() => SoftwareCatalog.ScanAll(SoftwareCatalog.RegistryEntries(),
-                    (drive) => ((IProgress<string>)progress).Report(drive), token));
+                var registered = await Task.Run(() => SoftwareCatalog.RegistryEntries());
                 if (IsDisposed) return;
-                entries = result.Entries;
-                ApplyFilter();
-                status.Text = entries.Count.ToString("N0") + " 项软件 · 已扫描 " +
-                    string.Join("、", result.Drives) + " · " + result.Unreadable.ToString("N0") + " 个目录无法读取";
+                token.ThrowIfCancellationRequested();
+                DateTime registryUtc = DateTime.UtcNow;
+                var found = await Task.Run(() => SoftwareCatalog.ScanAll(registered,
+                    drive => ((IProgress<string>)progress).Report(drive), token));
+                if (IsDisposed) return;
+                token.ThrowIfCancellationRequested();
+                scan.Enabled = false;
+                found.RegistryUtc = registryUtc;
+                found.FullScanUtc = DateTime.UtcNow;
+                bool saved = await Task.Run(() => cache.Save(found));
+                if (!IsDisposed) DisplaySnapshot(found, saved);
             }
             catch (OperationCanceledException) { if (!IsDisposed) status.Text = "全盘扫描已取消。"; }
             catch (Exception ex) { if (!IsDisposed) status.Text = "全盘扫描中断 · " + ex.Message; }
             finally
             {
-                cancellation.Dispose();
+                run.Dispose();
                 cancellation = null;
                 if (!IsDisposed)
                 {
@@ -141,6 +167,18 @@ namespace DiskDelta
                     scan.Enabled = registry.Enabled = true;
                 }
             }
+        }
+
+        private void DisplaySnapshot(SoftwareCatalog.Result result, bool saved)
+        {
+            snapshot = result;
+            entries = result.Entries;
+            ApplyFilter();
+            var timestamp = result.FullScanUtc == default(DateTime) ? "上次读取登记 " + Dashboard.Date(result.RegistryUtc.ToLocalTime()) :
+                "上次全盘扫描 " + Dashboard.Date(result.FullScanUtc.ToLocalTime()) + " · " + string.Join("、", result.Drives);
+            status.Text = timestamp + " · " + entries.Count.ToString("N0") + " 项软件" +
+                (result.Unreadable > 0 ? " · " + result.Unreadable.ToString("N0") + " 个目录无法读取" : "") +
+                (saved ? "" : " · 未保存");
         }
 
         private void ApplyFilter()
@@ -178,7 +216,7 @@ namespace DiskDelta
                     return;
                 }
                 foreach (var group in entry.Locations.OrderBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
-                    .GroupBy(item => !item.Value.StartsWith("匹配线索", StringComparison.Ordinal)).OrderByDescending(item => item.Key))
+                    .GroupBy(item => !SoftwareCatalog.IsClue(item.Value)).OrderByDescending(item => item.Key))
                 {
                     TreeNode category = paths.Nodes.Add(group.Key ? "登记位置" : "同名匹配");
                     foreach (var location in group)

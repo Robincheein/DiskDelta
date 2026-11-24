@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.Serialization;
 using System.Security;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -13,13 +14,24 @@ using Microsoft.Win32;
 
 namespace DiskDelta
 {
+    [DataContract]
     internal sealed class SoftwareEntry
     {
-        public string Name;
-        public string Publisher;
-        public string Version;
-        public readonly Dictionary<string, string> Locations = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        [DataMember(IsRequired = true)] public string Name;
+        [DataMember] public string Publisher;
+        [DataMember] public string Version;
+        [DataMember(IsRequired = true)] public Dictionary<string, string> Locations = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public override string ToString() { return string.IsNullOrEmpty(Version) ? Name : Name + "   " + Version; }
+
+        [OnDeserialized]
+        private void RestoreComparer(StreamingContext context)
+        {
+            if (Locations == null) throw new SerializationException();
+            var paths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var item in Locations)
+                if (!string.IsNullOrEmpty(item.Key) && !string.IsNullOrEmpty(item.Value)) paths[item.Key] = item.Value;
+            Locations = paths;
+        }
     }
 
     internal sealed class SoftwareCatalog
@@ -36,12 +48,45 @@ namespace DiskDelta
             "powershell", "pwsh", "wscript", "explorer", "control"
         };
 
+        [DataContract]
         public sealed class Result
         {
-            public readonly List<string> Drives = new List<string>();
-            public int Unreadable;
-            public List<SoftwareEntry> Entries;
+            [DataMember(IsRequired = true)] public readonly List<string> Drives = new List<string>();
+            [DataMember] public int Unreadable;
+            [DataMember(IsRequired = true)] public List<SoftwareEntry> Entries;
+            [DataMember(IsRequired = true)] public DateTime RegistryUtc;
+            [DataMember] public DateTime FullScanUtc;
+
+            public bool Valid
+            {
+                get
+                {
+                    return RegistryUtc != default(DateTime) && Drives != null && Entries != null &&
+                        Entries.All(item => item != null && !string.IsNullOrEmpty(item.Name));
+                }
+            }
         }
+
+        public static bool IsClue(string reason)
+        {
+            return reason.StartsWith("匹配线索", StringComparison.Ordinal);
+        }
+
+        public static Result UpdateRegistry(List<SoftwareEntry> entries, Result previous)
+        {
+            var result = new Result { Entries = entries, RegistryUtc = DateTime.UtcNow };
+            if (previous == null || previous.FullScanUtc == default(DateTime)) return result;
+            result.FullScanUtc = previous.FullScanUtc;
+            result.Unreadable = previous.Unreadable;
+            result.Drives.AddRange(previous.Drives);
+            var known = previous.Entries.ToLookup(Identity, StringComparer.OrdinalIgnoreCase);
+            foreach (SoftwareEntry item in entries)
+            foreach (var location in known[Identity(item)].SelectMany(entry => entry.Locations).Where(pair => IsClue(pair.Value)))
+                Add(item, location.Key, location.Value);
+            return result;
+        }
+
+        private static string Identity(SoftwareEntry entry) { return entry.Name + "\n" + entry.Publisher + "\n" + entry.Version; }
 
         public static List<SoftwareEntry> RegistryEntries()
         {

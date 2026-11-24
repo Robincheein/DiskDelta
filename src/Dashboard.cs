@@ -56,7 +56,7 @@ namespace DiskDelta
         };
         private readonly CleanupView cleanup;
         private readonly MigrationView migration;
-        private readonly SoftwareView software = new SoftwareView { Dock = DockStyle.Fill };
+        private readonly SoftwareView software;
         private readonly System.Windows.Forms.Timer refresh = new System.Windows.Forms.Timer { Interval = 20000 };
         private Report selected;
         private string latestReportId;
@@ -90,7 +90,9 @@ namespace DiskDelta
             this.dataPath = dataPath;
             palette = ChangePalette.Read(dataPath);
             updates = new GitHubUpdates(dataPath, typeof(Program).Assembly.Location);
-            cleanup = new CleanupView(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)) { Dock = DockStyle.Fill };
+            cleanup = new CleanupView(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), dataPath)
+                { Dock = DockStyle.Fill };
+            software = new SoftwareView(dataPath) { Dock = DockStyle.Fill };
             migration = new MigrationView(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), dataPath) { Dock = DockStyle.Fill };
             Text = "磁盘日记";
             using (Icon icon = Icon.ExtractAssociatedIcon(typeof(Program).Assembly.Location))
@@ -883,6 +885,7 @@ namespace DiskDelta
             {
                 files.Visible = folders.Visible = empty.Visible = false;
                 viewHint.Text = "";
+                if (view == 3) cleanup.ActivateView();
                 if (view == 5) software.ActivateView();
                 return;
             }

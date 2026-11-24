@@ -569,6 +569,7 @@ namespace DiskDelta
     internal sealed class MigrationView : UserControl
     {
         private readonly FolderMigration service;
+        private readonly FolderMigration installedService;
         private readonly string profile;
         private readonly TextBox source = new TextBox { Dock = DockStyle.Fill };
         private readonly TextBox destination = new TextBox { Dock = DockStyle.Fill };
@@ -576,26 +577,27 @@ namespace DiskDelta
         private readonly Button move = MaintenanceView.Action("迁移并建立联接", true);
         private readonly Button restore = MaintenanceView.Action("恢复原目录");
         private readonly Button release = MaintenanceView.Action("释放 C 盘备份");
+        private readonly Button scan = MaintenanceView.Action("扫描目录", true);
+        private readonly ComboBox scope = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 119, AccessibleName = "目录类别" };
+        private readonly DataGridView candidates = Dashboard.Grid();
+        private readonly Label catalogStatus = MaintenanceView.Note("");
         private readonly Label status = MaintenanceView.Note("");
         private readonly Label paths = MaintenanceView.Note("");
         private readonly ToolTip tips = new ToolTip();
         private bool busy;
+        private bool scanning;
+        private bool started;
+        private List<MigrationOption> options = new List<MigrationOption>();
         public bool Mutating { get { return busy; } }
+        public DataGridView CatalogGrid { get { return candidates; } }
 
         public MigrationView(string profileDirectory, string dataDirectory)
         {
             profile = profileDirectory;
             service = new FolderMigration(profileDirectory, dataDirectory);
-            var body = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
-            Controls.Add(body);
-            var layout = MaintenanceView.Layout(32, 32, 32, 35, 33, 35, 58, 38);
-            layout.Dock = DockStyle.Top;
-            layout.Height = 300;
-            body.Controls.Add(layout);
-            var heading = MaintenanceView.Note("迁移应用目录到其他 NTFS 盘");
-            heading.Dock = DockStyle.None;
-            heading.AutoSize = true;
-            heading.Margin = new Padding(5, 6, 5, 0);
+            installedService = new FolderMigration(profileDirectory, dataDirectory, true);
+            var page = MaintenanceView.Layout(34, 0, 25, 233);
+            Controls.Add(page);
             var help = MaintenanceView.Action("?");
             help.AutoSize = false;
             help.MinimumSize = Size.Empty;
@@ -604,22 +606,127 @@ namespace DiskDelta
             help.AccessibleName = "目录迁移说明";
             tips.SetToolTip(help, "目录迁移说明");
             help.Click += delegate { ShowHelp(); };
-            layout.Controls.Add(MaintenanceView.Actions(heading, help), 0, 0);
-            layout.Controls.Add(PathInput("C 盘源目录", source, profileDirectory), 0, 1);
-            layout.Controls.Add(PathInput("目标父目录", destination, ""), 0, 2);
-            layout.Controls.Add(MaintenanceView.Actions(move), 0, 3);
-            layout.Controls.Add(WithLabel("迁移记录", records), 0, 4);
-            layout.Controls.Add(MaintenanceView.Actions(restore, release), 0, 5);
+            scope.Items.AddRange(new[] { "全部目录", "用户目录", "已有链接", "安装目录" });
+            scope.SelectedIndex = 0;
+            scope.Margin = new Padding(1, 4, 7, 0);
+            page.Controls.Add(MaintenanceView.Actions(scan, scope, help), 0, 0);
+            page.Controls.Add(candidates, 0, 1);
+            page.Controls.Add(catalogStatus, 0, 2);
+            ConfigureCatalog();
+            var layout = MaintenanceView.Layout(32, 32, 35, 32, 34, 44, 0);
+            page.Controls.Add(layout, 0, 3);
+            layout.Controls.Add(PathInput("C 盘源目录", source, profileDirectory), 0, 0);
+            layout.Controls.Add(PathInput("目标位置", destination, ""), 0, 1);
+            tips.SetToolTip(destination, "用户目录请选择目标父目录。安装目录请选择目标盘，程序将使用该盘的专用目录。");
+            layout.Controls.Add(MaintenanceView.Actions(move), 0, 2);
+            layout.Controls.Add(WithLabel("迁移记录", records), 0, 3);
+            layout.Controls.Add(MaintenanceView.Actions(restore, release), 0, 4);
             paths.AutoEllipsis = true;
-            layout.Controls.Add(paths, 0, 6);
+            layout.Controls.Add(paths, 0, 5);
             status.AutoEllipsis = true;
-            layout.Controls.Add(status, 0, 7);
+            layout.Controls.Add(status, 0, 6);
             move.Click += async delegate { await Migrate(); };
             restore.Click += async delegate { await Restore(); };
             release.Click += async delegate { await Release(); };
             records.SelectedIndexChanged += delegate { ShowRecord(); };
             Reload(null);
             Disposed += delegate { tips.Dispose(); };
+        }
+
+        public void ActivateView()
+        {
+            if (started) return;
+            started = true;
+            ScanCatalog();
+        }
+
+        private void ConfigureCatalog()
+        {
+            Dashboard.Column(candidates, "名称", 174);
+            Dashboard.Column(candidates, "C 盘目录", 0);
+            Dashboard.Column(candidates, "链接目标", 0);
+            Dashboard.Column(candidates, "状态", 168);
+            scan.Click += delegate { ScanCatalog(); };
+            scope.SelectedIndexChanged += delegate { DisplayOptions(); };
+            candidates.CellClick += delegate(object sender, DataGridViewCellEventArgs e)
+            {
+                if (!busy && e.RowIndex >= 0)
+                {
+                    var row = (MigrationOption)candidates.Rows[e.RowIndex].Tag;
+                    if (row.CanUse) source.Text = row.Source;
+                }
+            };
+            candidates.CellDoubleClick += delegate(object sender, DataGridViewCellEventArgs e)
+            {
+                if (e.RowIndex >= 0 && ((MigrationOption)candidates.Rows[e.RowIndex].Tag).Linked)
+                    PathAction(item => ExplorerLocation.OpenFolder(item.Source));
+            };
+            var menu = new ContextMenuStrip();
+            menu.Items.Add("打开源目录", null, delegate { PathAction(item => ExplorerLocation.OpenFolder(item.Source)); });
+            var target = menu.Items.Add("复制链接目标", null, delegate { PathAction(item => Clipboard.SetText(item.Target)); });
+            menu.Items.Add("复制源路径", null, delegate { PathAction(item => Clipboard.SetText(item.Source)); });
+            menu.Opening += delegate(object sender, System.ComponentModel.CancelEventArgs e)
+            {
+                var item = candidates.CurrentRow == null ? null : candidates.CurrentRow.Tag as MigrationOption;
+                e.Cancel = item == null;
+                target.Enabled = item != null && item.Target != null;
+            };
+            candidates.ContextMenuStrip = menu;
+            candidates.CellMouseDown += delegate(object sender, DataGridViewCellMouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Right && e.RowIndex >= 0 && e.ColumnIndex >= 0)
+                    candidates.CurrentCell = candidates.Rows[e.RowIndex].Cells[e.ColumnIndex];
+            };
+            Disposed += delegate { menu.Dispose(); };
+        }
+
+        private void PathAction(Action<MigrationOption> action)
+        {
+            var row = candidates.CurrentRow == null ? null : candidates.CurrentRow.Tag as MigrationOption;
+            if (row == null) return;
+            try { action(row); }
+            catch (Exception ex) { catalogStatus.Text = ex.Message; }
+        }
+
+        private async void ScanCatalog()
+        {
+            if (busy || scanning) return;
+            scanning = true;
+            scan.Enabled = false;
+            catalogStatus.Text = "正在扫描用户目录、安装目录和现有链接…";
+            try
+            {
+                options = await Task.Run(() => MigrationCatalog.Scan(profile, service, service.Load().Concat(installedService.Load())));
+                if (!IsDisposed) DisplayOptions();
+            }
+            catch (Exception ex) { if (!IsDisposed) catalogStatus.Text = "扫描失败 · " + ex.Message; }
+            finally { scanning = false; if (!IsDisposed) scan.Enabled = !busy; }
+        }
+
+        private void DisplayOptions()
+        {
+            candidates.SuspendLayout();
+            try
+            {
+                candidates.Rows.Clear();
+                foreach (var item in options.Where(row => scope.SelectedIndex == 0 ||
+                    (scope.SelectedIndex == 1 && !row.Installed) || (scope.SelectedIndex == 2 && row.Linked) ||
+                    (scope.SelectedIndex == 3 && row.Installed)))
+                {
+                    int index = candidates.Rows.Add(item.Name, item.Source, item.Target ?? "—", item.Status);
+                    DataGridViewRow row = candidates.Rows[index];
+                    row.Tag = item;
+                    row.Cells[1].ToolTipText = item.Source;
+                    row.Cells[2].ToolTipText = item.Target;
+                    row.Cells[3].ToolTipText = item.Status;
+                    if (item.Installed && item.CanUse)
+                        row.Cells[3].Style.ForeColor = Color.FromArgb(150, 61, 21);
+                }
+                candidates.ClearSelection();
+                catalogStatus.Text = candidates.Rows.Count.ToString("N0") + " 个目录 · 已有链接 " +
+                    candidates.Rows.Cast<DataGridViewRow>().Count(row => ((MigrationOption)row.Tag).Linked).ToString("N0");
+            }
+            finally { candidates.ResumeLayout(); }
         }
 
         private void ShowHelp()
@@ -648,6 +755,10 @@ namespace DiskDelta
                 AddHelp(text, bold, "迁移前",
                     "完全退出相关软件，包括它的托盘和后台进程。先挑一个明确属于该软件的缓存或配置子目录，避免整搬用户目录、AppData 或安装目录。" +
                     "目标盘须为长期连接的固定 NTFS 盘，留足空间。目标父目录下须留出源目录的同名位置。");
+                AddHelp(text, bold, "Program Files 和 Program Files (x86)",
+                    "扫描只把能与单个系统安装登记对应的目录列为可预检，并排除共享组件以及登记的服务和驱动。" +
+                    "迁移选中目录时，只需选择目标盘。安装目录会放到该盘带有访问权限保护的 DiskDelta-ProgramFiles 下。" +
+                    "即使通过预检，启动、自动更新、安装修复和卸载仍可能受影响。需要勾选确认并授权管理员权限。");
                 AddHelp(text, bold, "什么时候释放 C 盘空间",
                     "迁移完成后，原文件会作为备份留在 C 盘。先重新打开软件，确认功能、配置和读写正常。再次关掉软件后，可以在迁移记录里选择「释放 C 盘备份」。" +
                     "程序会核对备份文件及其数据流，目标文件缺失或被改写时会保留备份。释放会永久删除原盘备份。");
@@ -715,7 +826,7 @@ namespace DiskDelta
         {
             try
             {
-                var saved = service.Load();
+                var saved = service.Load().Concat(installedService.Load()).ToList();
                 records.Items.Clear();
                 records.Items.AddRange(saved.ToArray());
                 if (saved.Count > 0) records.SelectedIndex = Math.Max(0, saved.FindIndex(item => item.Id == selected));
@@ -740,6 +851,20 @@ namespace DiskDelta
         {
             try
             {
+                if (string.IsNullOrWhiteSpace(source.Text) || string.IsNullOrWhiteSpace(destination.Text))
+                    throw new IOException("请选择源目录和目标位置。");
+                string normalized = PrivateFiles.FullPath(source.Text.Trim());
+                if (InstalledFolders.RootFor(normalized) != null)
+                {
+                    string disk = Path.GetPathRoot(PrivateFiles.FullPath(destination.Text.Trim()));
+                    string target = InstalledMigration.Target(normalized, disk);
+                    var known = options.Find(item => string.Equals(item.Source, normalized, StringComparison.OrdinalIgnoreCase));
+                    if (known != null && !known.CanUse) throw new IOException(known.Status);
+                    if (!ConfirmInstalled(normalized, target)) return;
+                    await Run(null, "正在等待管理员授权及安装目录迁移…",
+                        () => InstalledMigration.Start("move", normalized, disk.Substring(0, 2)));
+                    return;
+                }
                 var record = service.Preview(source.Text.Trim(), destination.Text.Trim());
                 if (!MaintenanceView.Confirm(this, "请确认相关软件已关闭。\n\n原路径：" + record.Source +
                     "\n目标路径：" + record.Target + "\n\n程序会复制并校验文件，保留原盘备份，然后在原路径建立目录联接。",
@@ -753,6 +878,44 @@ namespace DiskDelta
             catch (Exception ex) { status.Text = ex.Message; tips.SetToolTip(status, ex.Message); }
         }
 
+        private bool ConfirmInstalled(string from, string to)
+        {
+            using (var dialog = new Form
+            {
+                Text = "确认迁移安装目录", Font = Font, BackColor = Color.White, ClientSize = new Size(625, 270),
+                StartPosition = FormStartPosition.CenterParent, MinimizeBox = false, MaximizeBox = false,
+                FormBorderStyle = FormBorderStyle.FixedDialog, ShowInTaskbar = false
+            })
+            {
+                var layout = MaintenanceView.Layout(0, 33, 38);
+                layout.Padding = new Padding(12, 8, 12, 4);
+                var details = new TextBox
+                {
+                    Multiline = true, WordWrap = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill,
+                    BorderStyle = BorderStyle.None, BackColor = Color.White,
+                    Text = "迁移安装目录有较高风险，可能影响软件启动、自动更新、修复或卸载。\r\n\r\n" +
+                        "源目录  " + from + "\r\n目标  " + to + "\r\n\r\n" +
+                        "请退出软件、托盘和更新程序。原目录会备份，验证软件前请保留备份。"
+                };
+                details.Select(0, 0);
+                var checkedRisk = new CheckBox { Text = "我已退出相关程序，并确认接受上述风险", Dock = DockStyle.Fill };
+                var continueButton = MaintenanceView.Action("继续并请求管理员权限", true);
+                continueButton.Enabled = false;
+                continueButton.DialogResult = DialogResult.OK;
+                checkedRisk.CheckedChanged += delegate { continueButton.Enabled = checkedRisk.Checked; };
+                var cancel = MaintenanceView.Action("取消");
+                cancel.DialogResult = DialogResult.Cancel;
+                dialog.CancelButton = cancel;
+                layout.Controls.Add(details, 0, 0);
+                layout.Controls.Add(checkedRisk, 0, 1);
+                layout.Controls.Add(MaintenanceView.Actions(continueButton, cancel), 0, 2);
+                dialog.Controls.Add(layout);
+                dialog.AutoScaleDimensions = new SizeF(96, 96);
+                dialog.AutoScaleMode = AutoScaleMode.Dpi;
+                return dialog.ShowDialog(this) == DialogResult.OK && checkedRisk.Checked;
+            }
+        }
+
         private async Task Restore()
         {
             var record = records.SelectedItem as MigrationRecord;
@@ -760,6 +923,7 @@ namespace DiskDelta
                 "确认恢复原目录")) return;
             await Run(record, "正在恢复原目录…", () =>
             {
+                if (record.Installed) return InstalledMigration.Start("restore", record.Id);
                 service.Restore(record);
                 return "原目录已恢复，目标盘副本已保留。";
             });
@@ -773,6 +937,7 @@ namespace DiskDelta
                 record.Backup, "确认释放原盘备份")) return;
             await Run(record, "正在核对目标文件，再释放已验证的备份…", () =>
             {
+                if (record.Installed) return InstalledMigration.Start("release", record.Id);
                 var result = service.ReleaseBackup(record);
                 return "已删除 " + result.Deleted.ToString("N0") + " 个备份文件 · " + Dashboard.Bytes(result.Bytes) +
                     "（逻辑大小） · 跳过 " + result.Skipped.ToString("N0") + " 个";
@@ -782,7 +947,7 @@ namespace DiskDelta
         private async Task Run(MigrationRecord record, string message, Func<string> action)
         {
             busy = true;
-            move.Enabled = records.Enabled = source.Enabled = destination.Enabled = restore.Enabled = release.Enabled = false;
+            move.Enabled = records.Enabled = source.Enabled = destination.Enabled = restore.Enabled = release.Enabled = scan.Enabled = false;
             status.Text = message;
             try
             {
@@ -796,8 +961,10 @@ namespace DiskDelta
                 {
                     busy = false;
                     move.Enabled = records.Enabled = source.Enabled = destination.Enabled = true;
+                    scan.Enabled = !scanning;
                     tips.SetToolTip(status, status.Text);
-                    Reload(record.Id);
+                    Reload(record == null ? null : record.Id);
+                    if (started) ScanCatalog();
                 }
             }
         }

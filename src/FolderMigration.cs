@@ -15,6 +15,7 @@ namespace DiskDelta
         public string Id { get; set; }
         public string Source { get; set; }
         public string Target { get; set; }
+        public bool Installed { get; set; }
         [XmlIgnore] public string Backup { get { return Source + ".DiskDelta-" + Id + ".backup"; } }
         [XmlIgnore] public string PendingLink { get { return Source + ".DiskDelta-" + Id + ".link"; } }
         [XmlIgnore] public string Staging { get { return Target + ".DiskDelta-" + Id + ".staging"; } }
@@ -33,10 +34,12 @@ namespace DiskDelta
 
         private readonly string profile;
         private readonly string journal;
-        public FolderMigration(string userProfile, string dataDirectory)
+        private readonly bool installed;
+        public FolderMigration(string userProfile, string dataDirectory, bool installed = false)
         {
             profile = PrivateFiles.FullPath(userProfile);
-            journal = Path.Combine(dataDirectory, "Migrations");
+            this.installed = installed;
+            journal = installed ? InstalledMigration.Journal : Path.Combine(dataDirectory, "Migrations");
         }
 
         public MigrationRecord Preview(string source, string destinationFolder)
@@ -50,8 +53,10 @@ namespace DiskDelta
             PrivateFiles.VerifyDirectory(destination);
             PrivateFiles.VerifyDirectory(source);
             string target = Path.Combine(destination, Path.GetFileName(source));
-            if (Directory.Exists(target) || File.Exists(target)) throw new IOException("目标同名路径已存在：" + target);
-            return new MigrationRecord { Id = Guid.NewGuid().ToString("N"), Source = source, Target = target };
+            if (PrivateFiles.Exists(target)) throw new IOException("目标同名路径已存在：" + target);
+            var record = new MigrationRecord { Id = Guid.NewGuid().ToString("N"), Source = source, Target = target, Installed = installed };
+            ValidateRecord(record);
+            return record;
         }
 
         public List<MigrationRecord> Load()
@@ -82,9 +87,14 @@ namespace DiskDelta
             RequireNtfs(item.Target);
             using (Lock())
             {
-                ReadTree(item.Source);
+                var tree = ReadTree(item.Source);
+                if (installed && tree.Any(entry => !entry.Value && entry.Key.EndsWith(".sys", StringComparison.OrdinalIgnoreCase)))
+                    throw new IOException("安装目录包含驱动文件，已停止迁移。");
+                if (installed && tree.Where(entry => !entry.Value).Sum(entry => new FileInfo(Path.Combine(item.Source, entry.Key)).Length) >
+                    new DriveInfo(Path.GetPathRoot(item.Target)).AvailableFreeSpace)
+                    throw new IOException("目标盘空间不足。");
                 PrivateFiles.VerifyDirectory(Path.GetDirectoryName(item.Target));
-                if (Directory.Exists(item.Target) || File.Exists(item.Target))
+                if (PrivateFiles.Exists(item.Target))
                     throw new IOException("目标同名路径已存在：" + item.Target);
                 Save(item);
                 PrivateFiles.CreateDirectory(item.Staging);
@@ -95,6 +105,7 @@ namespace DiskDelta
 
                 PrivateFiles.VerifyDirectory(item.Source);
                 PrivateFiles.VerifyDirectory(item.Staging);
+                if (installed) InstalledMigration.RequireStopped(item.Source, item.Target);
                 Directory.Move(item.Source, item.Backup);
                 try
                 {
@@ -108,7 +119,9 @@ namespace DiskDelta
                 }
                 catch
                 {
-                    if (!Directory.Exists(item.Source) && !File.Exists(item.Source))
+                    if (PrivateFiles.PointsTo(item.Source, item.Target))
+                        Directory.Delete(item.Source, false);
+                    if (!PrivateFiles.Exists(item.Source))
                         Directory.Move(item.Backup, item.Source);
                     throw;
                 }
@@ -125,13 +138,13 @@ namespace DiskDelta
                 bool hadLink = PrivateFiles.PointsTo(item.Source, item.Target);
                 if (hadLink)
                     Directory.Move(item.Source, item.PendingLink);
-                else if (Directory.Exists(item.Source) || File.Exists(item.Source))
+                else if (PrivateFiles.Exists(item.Source))
                     throw new IOException("原路径已被占用，或联接目标有变化。两份数据已保留。");
 
                 try { Directory.Move(item.Backup, item.Source); }
                 catch
                 {
-                    if (hadLink && !Directory.Exists(item.Source) && !File.Exists(item.Source))
+                    if (hadLink && !PrivateFiles.Exists(item.Source))
                         Directory.Move(item.PendingLink, item.Source);
                     throw;
                 }
@@ -206,8 +219,16 @@ namespace DiskDelta
         private string ValidateSource(string value)
         {
             string source = PrivateFiles.FullPath(value);
-            if (!PrivateFiles.Below(source, profile) || Path.GetPathRoot(source) != Program.DefaultRoot)
+            if (installed ? !InstalledFolders.IsAppFolder(source) : !IsUserCandidate(source))
                 throw new IOException("请选择 C 盘当前用户目录里的单个软件配置或缓存文件夹。");
+            RequireNtfs(source);
+            return source;
+        }
+
+        public bool IsUserCandidate(string source)
+        {
+            if (!PrivateFiles.Below(source, profile) || Path.GetPathRoot(source) != Program.DefaultRoot ||
+                source.IndexOf(".DiskDelta-", profile.Length, StringComparison.OrdinalIgnoreCase) >= 0) return false;
             string[] parts = source.Substring(profile.Length + 1).Split('\\');
             bool appData = parts.Length >= 3 && parts[0].Equals("AppData", StringComparison.OrdinalIgnoreCase) &&
                 new[] { "Local", "Roaming", "LocalLow" }.Contains(parts[1], StringComparer.OrdinalIgnoreCase) &&
@@ -215,23 +236,22 @@ namespace DiskDelta
             bool dotFolder = parts[0].StartsWith(".", StringComparison.Ordinal) && !Protected.Contains(parts[0]);
             bool nestedDotFolder = parts.Length >= 2 &&
                 new[] { ".config", ".cache" }.Contains(parts[0], StringComparer.OrdinalIgnoreCase) && !Protected.Contains(parts[1]);
-            if (!appData && !dotFolder && !nestedDotFolder)
-                throw new IOException("请选择单个应用的 AppData 子目录或用户目录下的软件点文件夹。");
-            RequireNtfs(source);
-            return source;
+            return appData || dotFolder || nestedDotFolder;
         }
 
         private void ValidateRecord(MigrationRecord item)
         {
             Guid id;
-            if (item == null || !Guid.TryParseExact(item.Id, "N", out id) ||
+            if (item == null || item.Installed != installed || !Guid.TryParseExact(item.Id, "N", out id) ||
                 ValidateSource(item.Source) != item.Source || PrivateFiles.FullPath(item.Target) != item.Target ||
                 Path.GetPathRoot(item.Target) == Program.DefaultRoot ||
+                (installed && !string.Equals(InstalledMigration.TargetPath(item.Source, Path.GetPathRoot(item.Target)),
+                    item.Target, StringComparison.OrdinalIgnoreCase)) ||
                 !string.Equals(Path.GetFileName(item.Source), Path.GetFileName(item.Target), StringComparison.OrdinalIgnoreCase))
                 throw new IOException("无法校验迁移记录路径。");
         }
 
-        private static void RequireNtfs(string path)
+        internal static void RequireNtfs(string path)
         {
             var drive = new DriveInfo(Path.GetPathRoot(path));
             if (drive.DriveType != DriveType.Fixed || !drive.IsReady ||

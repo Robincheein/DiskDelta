@@ -318,7 +318,7 @@ namespace DiskDelta
             cleanup.ScaleColumns(dpi);
             int height = TablePixels(GridRowHeight);
             var padding = new Padding(TablePixels(7), 0, TablePixels(7), 0);
-            foreach (DataGridView grid in new[] { folders, files, timeline.Records })
+            foreach (DataGridView grid in new[] { folders, files, timeline.Records, migration.CatalogGrid })
             {
                 grid.ColumnHeadersHeight = TablePixels(GridHeaderHeight);
                 grid.ColumnHeadersDefaultCellStyle.Padding = padding;
@@ -886,6 +886,7 @@ namespace DiskDelta
                 files.Visible = folders.Visible = empty.Visible = false;
                 viewHint.Text = "";
                 if (view == 3) cleanup.ActivateView();
+                if (view == 4) migration.ActivateView();
                 if (view == 5) software.ActivateView();
                 return;
             }

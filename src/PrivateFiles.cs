@@ -175,18 +175,57 @@ namespace DiskDelta
 
         public static bool PointsTo(string junction, string target)
         {
+            bool symbolic;
+            string stored = LinkPath(junction, out symbolic);
+            return !symbolic && string.Equals(stored, @"\??\" + target, StringComparison.OrdinalIgnoreCase);
+        }
+
+        public static string DirectoryLinkTarget(string path, out string kind)
+        {
+            bool symbolic;
+            string target = LinkPath(path, out symbolic);
+            kind = target == null ? "重解析目录" : symbolic ? "符号链接" : "目录联接";
+            if (target == null) return null;
+            const string ntPath = @"\??\";
+            if (target.StartsWith(ntPath + @"UNC\", StringComparison.OrdinalIgnoreCase))
+                return @"\\" + target.Substring(ntPath.Length + 4);
+            if (target.StartsWith(ntPath, StringComparison.Ordinal))
+            {
+                target = target.Substring(ntPath.Length);
+                return target.Length > 1 && target[1] == ':' ? target : @"\\?\" + target;
+            }
+            if (!symbolic) return target;
+            try { return Path.IsPathRooted(target) ? target : Path.GetFullPath(Path.Combine(Path.GetDirectoryName(path), target)); }
+            catch (ArgumentException) { return target; }
+            catch (IOException) { return target; }
+            catch (NotSupportedException) { return target; }
+        }
+
+        private static string LinkPath(string junction, out bool symbolic)
+        {
+            symbolic = false;
             using (SafeFileHandle entry = Open(junction, ReadAttributes, 7, false))
             {
-                if (entry.IsInvalid || !MatchesPath(entry, junction)) return false;
+                if (entry.IsInvalid || !MatchesPath(entry, junction)) return null;
                 var output = new byte[16384];
                 uint count;
                 if (!GetReparseData(entry, 0x000900a8, IntPtr.Zero, 0, output, output.Length, out count, IntPtr.Zero) ||
-                    count < 16 || BitConverter.ToUInt32(output, 0) != 0xa0000003u) return false;
-                int offset = 16 + BitConverter.ToUInt16(output, 8);
+                    count < 16) return null;
+                uint tag = BitConverter.ToUInt32(output, 0);
+                symbolic = tag == 0xa000000cu;
+                if (!symbolic && tag != 0xa0000003u || symbolic && count < 20) return null;
+                int offset = (symbolic ? 20 : 16) + BitConverter.ToUInt16(output, 8);
                 int length = BitConverter.ToUInt16(output, 10);
-                return offset + length <= count &&
-                    string.Equals(Encoding.Unicode.GetString(output, offset, length), @"\??\" + target, StringComparison.OrdinalIgnoreCase);
+                return length > 0 && (length & 1) == 0 && offset + length <= count
+                    ? Encoding.Unicode.GetString(output, offset, length) : null;
             }
+        }
+
+        public static bool Exists(string path)
+        {
+            try { File.GetAttributes(path); return true; }
+            catch (FileNotFoundException) { return false; }
+            catch (DirectoryNotFoundException) { return false; }
         }
 
         public static FileStream OpenForVerification(string path, string streamName)

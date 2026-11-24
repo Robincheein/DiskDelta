@@ -20,6 +20,8 @@ namespace DiskDelta
         {
             if (args.Length > 0 && args[0] == "--apply-update")
                 return UpdateInstaller.Apply(typeof(Program).Assembly.Location, args);
+            if (args.Length > 0 && args[0] == "--migration-admin")
+                return InstalledMigration.Run(args);
             bool startup = args.Length == 1 && args[0] == "--startup";
             if (args.Length != 0 && !startup)
                 return Headless(args);

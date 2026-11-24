@@ -2,8 +2,12 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Pipes;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace DiskDelta
@@ -11,6 +15,7 @@ namespace DiskDelta
     internal static class InstalledMigration
     {
         private const string DestinationName = "DiskDelta-ProgramFiles";
+        private const string LogPipePrefix = "DiskDelta-Migration-";
         public static readonly string Journal = Path.Combine(InstalledFolders.Roots[0], InstalledFolders.JournalName);
         private static readonly SecurityIdentifier Administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
         private static readonly SecurityIdentifier SystemAccount = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
@@ -34,18 +39,38 @@ namespace DiskDelta
             return Path.Combine(volume, DestinationName, Path.GetFileName(root), source.Substring(root.Length + 1));
         }
 
-        public static string Start(string action, string value, string volume = null)
+        public static string Start(string action, string value, Action<string> log, string volume = null)
         {
-            string arguments = "--migration-admin " + action + " \"" + value + "\"" + (volume == null ? "" : " " + volume);
+            string id = Guid.NewGuid().ToString("N");
+            string arguments = "--migration-admin " + action + " \"" + value + "\"" + (volume == null ? "" : " " + volume) + " --log " + id;
+            var security = new PipeSecurity();
+            using (var identity = WindowsIdentity.GetCurrent())
+                security.AddAccessRule(new PipeAccessRule(identity.User, PipeAccessRights.FullControl, AccessControlType.Allow));
+            security.AddAccessRule(new PipeAccessRule(Administrators, PipeAccessRights.Write | PipeAccessRights.Synchronize,
+                AccessControlType.Allow));
             try
             {
-                using (var process = Process.Start(new ProcessStartInfo(typeof(Program).Assembly.Location, arguments)
-                    { UseShellExecute = true, Verb = "runas" }))
+                using (var stop = new CancellationTokenSource())
+                using (var pipe = new NamedPipeServerStream(LogPipePrefix + id, PipeDirection.In, 1,
+                    PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 4096, 0, security))
                 {
-                    process.WaitForExit();
-                    if (process.ExitCode != 0) return "安装目录操作未完成，请查看提示或迁移记录。";
-                    return action == "move" ? "已建立联接，请验证软件后再决定是否释放备份。" :
-                        action == "restore" ? "已恢复原安装目录，目标盘副本已保留。" : "备份释放操作已完成。";
+                    var receive = ReceiveLogs(pipe, stop.Token, log);
+                    try
+                    {
+                        string exe = typeof(Program).Assembly.Location;
+                        log("管理员命令 \"" + exe + "\" " + arguments);
+                        using (var process = Process.Start(new ProcessStartInfo(exe, arguments)
+                            { UseShellExecute = true, Verb = "runas" }))
+                        {
+                            process.WaitForExit();
+                            receive.Wait(2000);
+                            log("管理员子进程退出代码 " + process.ExitCode);
+                            if (process.ExitCode != 0) return "安装目录操作未完成，请查看日志或迁移记录。";
+                            return action == "move" ? "已建立联接，请验证软件后再决定是否释放备份。" :
+                                action == "restore" ? "已恢复原安装目录，目标盘副本已保留。" : "备份释放操作已完成。";
+                        }
+                    }
+                    finally { stop.Cancel(); }
                 }
             }
             catch (Win32Exception ex)
@@ -55,55 +80,106 @@ namespace DiskDelta
             }
         }
 
-        public static int Run(string[] args)
+        private static async Task ReceiveLogs(NamedPipeServerStream pipe, CancellationToken stop, Action<string> log)
         {
             try
             {
-                using (var identity = WindowsIdentity.GetCurrent())
-                    if (!new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
-                        throw new UnauthorizedAccessException("安装目录操作需要管理员权限。");
-                if (args.Length < 3) return 2;
-                string action = args[1];
-                RequireProtected(InstalledFolders.Roots[0]);
-                var service = new FolderMigration(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), Program.DataPath, true);
-                if (action == "move" && args.Length == 4)
+                await pipe.WaitForConnectionAsync(stop).ConfigureAwait(false);
+                using (var input = new StreamReader(pipe, Encoding.UTF8))
                 {
-                    string source = PrivateFiles.FullPath(args[2]);
-                    string target = Target(source, args[3]);
-                    string reason = new InstalledFolders().BlockReason(source);
-                    if (reason != null) throw new IOException(reason);
-                    RequireSourcePath(source);
-                    RequireStopped(source, target);
-                    PrepareTarget(target);
-                    PrepareProtectedDirectory(Journal);
-                    service.Move(service.Preview(source, Path.GetDirectoryName(target)));
-                    return 0;
+                    string line;
+                    while ((line = await input.ReadLineAsync().ConfigureAwait(false)) != null)
+                        log(line);
                 }
+            }
+            catch (OperationCanceledException) { }
+            catch (ObjectDisposedException) { }
+            catch (IOException ex) { if (!stop.IsCancellationRequested) log("迁移日志连接中断 · " + ex.Message); }
+        }
 
-                Guid id;
-                if (args.Length != 3 || !Guid.TryParseExact(args[2], "N", out id) ||
-                    (action != "restore" && action != "release")) return 2;
-                RequireProtected(Journal);
-                var record = service.Load().Find(item => item.Id == args[2]);
-                if (record == null) throw new IOException("找不到受保护的迁移记录。");
-                RequireSourcePath(Path.GetDirectoryName(record.Source));
-                RequireProtected(record.Backup);
-                RequireStopped(record.Source, record.Target);
-                if (action == "restore") service.Restore(record);
-                else
+        public static int Run(string[] args)
+        {
+            StreamWriter output = null;
+            object outputLock = new object();
+            Action<string> log = delegate(string text)
+            {
+                if (output == null) return;
+                lock (outputLock)
                 {
-                    RequireTarget(record.Target);
-                    var released = service.ReleaseBackup(record);
-                    if (released.Skipped > 0)
-                        throw new IOException("仍有 " + released.Skipped + " 个备份文件未释放。");
+                    try { output.WriteLine(text); }
+                    catch (IOException) { }
                 }
-                return 0;
+            };
+            try
+            {
+                int count = args.Length;
+                if (count >= 4 && args[count - 2] == "--log")
+                {
+                    Guid logId;
+                    if (!Guid.TryParseExact(args[count - 1], "N", out logId)) return 2;
+                    using (var pipe = new NamedPipeClientStream(".", LogPipePrefix + logId.ToString("N"),
+                        PipeDirection.Out, PipeOptions.None, TokenImpersonationLevel.Identification))
+                    {
+                        pipe.Connect(4000);
+                        using (output = new StreamWriter(pipe, new UTF8Encoding(false)) { AutoFlush = true })
+                        {
+                            try { return RunAction(args, count - 2, log); }
+                            catch (Exception ex) { log("操作中断 · " + ex.Message); throw; }
+                        }
+                    }
+                }
+                return RunAction(args, count, log);
             }
             catch (Exception ex)
             {
                 MessageBox.Show(ex.Message, "安装目录迁移", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return 1;
             }
+        }
+
+        private static int RunAction(string[] args, int count, Action<string> log)
+        {
+            using (var identity = WindowsIdentity.GetCurrent())
+                if (!new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
+                    throw new UnauthorizedAccessException("安装目录操作需要管理员权限。");
+            if (count < 3) return 2;
+            log("管理员子进程已启动");
+            string action = args[1];
+            RequireProtected(InstalledFolders.Roots[0]);
+            var service = new FolderMigration(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), Program.DataPath, true);
+            if (action == "move" && count == 4)
+            {
+                string source = PrivateFiles.FullPath(args[2]);
+                string target = Target(source, args[3]);
+                log("管理员预检 " + source + " → " + target);
+                string reason = new InstalledFolders().BlockReason(source);
+                if (reason != null) throw new IOException(reason);
+                RequireSourcePath(source);
+                RequireStopped(source, target);
+                PrepareTarget(target, log);
+                PrepareProtectedDirectory(Journal, log);
+                service.Move(service.Preview(source, target), log);
+                return 0;
+            }
+
+            Guid id;
+            if (count != 3 || !Guid.TryParseExact(args[2], "N", out id) ||
+                (action != "restore" && action != "release")) return 2;
+            RequireProtected(Journal);
+            var record = service.Load().Find(item => item.Id == args[2]);
+            if (record == null) throw new IOException("找不到受保护的迁移记录。");
+            RequireSourcePath(Path.GetDirectoryName(record.Source));
+            RequireProtected(record.Backup);
+            RequireStopped(record.Source, record.Target);
+            if (action == "restore") service.Restore(record, log);
+            else
+            {
+                RequireTarget(record.Target);
+                var released = service.ReleaseBackup(record, log);
+                if (released.Skipped > 0)
+                    throw new IOException("仍有 " + released.Skipped + " 个备份文件未释放。");
+            }
+            return 0;
         }
 
         public static void RequireSourcePath(string path)
@@ -119,7 +195,7 @@ namespace DiskDelta
             }
         }
 
-        private static void PrepareTarget(string path)
+        private static void PrepareTarget(string path, Action<string> log)
         {
             string volume = Path.GetPathRoot(path);
             RequireProtected(volume, true);
@@ -127,7 +203,7 @@ namespace DiskDelta
             foreach (string part in Path.GetDirectoryName(path).Substring(volume.Length).Split('\\'))
             {
                 current = Path.Combine(current, part);
-                PrepareProtectedDirectory(current);
+                PrepareProtectedDirectory(current, log);
             }
         }
 
@@ -143,7 +219,7 @@ namespace DiskDelta
             }
         }
 
-        private static void PrepareProtectedDirectory(string path)
+        private static void PrepareProtectedDirectory(string path, Action<string> log)
         {
             if (!PrivateFiles.Exists(path))
             {
@@ -154,6 +230,7 @@ namespace DiskDelta
                 acl.AddAccessRule(Rule(SystemAccount, FileSystemRights.FullControl));
                 acl.AddAccessRule(Rule(Installer, FileSystemRights.FullControl));
                 acl.AddAccessRule(Rule(Users, FileSystemRights.ReadAndExecute));
+                log("Windows API 创建受保护目录 " + path);
                 Directory.CreateDirectory(path, acl);
             }
             RequireProtected(path);

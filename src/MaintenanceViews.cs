@@ -584,7 +584,14 @@ namespace DiskDelta
         private readonly Label catalogStatus = MaintenanceView.Note("");
         private readonly Label status = MaintenanceView.Note("");
         private readonly Label paths = MaintenanceView.Note("");
+        private readonly TextBox migrationLog = new TextBox
+        {
+            Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, BackColor = Color.White,
+            ScrollBars = ScrollBars.Vertical, AccessibleName = "实时迁移日志"
+        };
         private readonly ToolTip tips = new ToolTip();
+        private string selectedDestination;
+        private bool writingDestination;
         private bool busy;
         private bool scanning;
         private bool started;
@@ -604,7 +611,7 @@ namespace DiskDelta
             profile = profileDirectory;
             service = new FolderMigration(profileDirectory, dataDirectory);
             installedService = new FolderMigration(profileDirectory, dataDirectory, true);
-            var page = MaintenanceView.Layout(34, 0, 25, 233);
+            var page = MaintenanceView.Layout(34, 0, 25, 233, 104);
             Controls.Add(page);
             var help = MaintenanceView.Action("?");
             help.AutoSize = false;
@@ -630,7 +637,14 @@ namespace DiskDelta
             page.Controls.Add(layout, 0, 3);
             layout.Controls.Add(PathInput("C 盘源目录", source, profileDirectory), 0, 0);
             layout.Controls.Add(PathInput("目标位置", destination, ""), 0, 1);
-            tips.SetToolTip(destination, "用户目录请选择目标父目录。安装目录请选择目标盘，程序将使用该盘的专用目录。");
+            tips.SetToolTip(destination, "完成迁移后文件所在的路径");
+            source.TextChanged += delegate { if (selectedDestination != null) ApplyDestination(selectedDestination); };
+            destination.TextChanged += delegate { if (!writingDestination) selectedDestination = null; };
+            destination.Validated += delegate
+            {
+                if (selectedDestination == null && !string.IsNullOrWhiteSpace(destination.Text))
+                    ApplyDestination(destination.Text.Trim());
+            };
             layout.Controls.Add(MaintenanceView.Actions(move), 0, 2);
             layout.Controls.Add(WithLabel("迁移记录", records), 0, 3);
             layout.Controls.Add(MaintenanceView.Actions(restore, release), 0, 4);
@@ -638,6 +652,17 @@ namespace DiskDelta
             layout.Controls.Add(paths, 0, 5);
             status.AutoEllipsis = true;
             layout.Controls.Add(status, 0, 6);
+            var logGroup = new GroupBox { Text = "迁移日志", Dock = DockStyle.Fill, Padding = new Padding(6, 4, 6, 6) };
+            logGroup.Controls.Add(migrationLog);
+            page.Controls.Add(logGroup, 0, 4);
+            page.SizeChanged += delegate
+            {
+                int baseline = Math.Max(25, candidates.RowTemplate.Height);
+                int minimum = 48 * baseline / 25;
+                int maximum = 104 * baseline / 25;
+                page.RowStyles[4].Height = Math.Max(minimum, Math.Min(maximum,
+                    page.ClientSize.Height - (34 + 25 + 233 + 82) * baseline / 25));
+            };
             move.Click += async delegate { await Migrate(); };
             restore.Click += async delegate { await Restore(); };
             release.Click += async delegate { await Release(); };
@@ -875,11 +900,11 @@ namespace DiskDelta
                     "把 C 盘中某个软件的配置或缓存目录复制并校验到另一个盘，再在原路径建立 NTFS 目录联接。软件仍可以使用原来的 C 盘路径，实际读写会到目标盘。");
                 AddHelp(text, bold, "举例：把 ExampleApp 的缓存迁到 D 盘",
                     "C 盘源目录填\nC:\\Users\\小林\\AppData\\Local\\ExampleApp\\Cache\n\n" +
-                    "目标父目录选择已存在的 D:\\迁移目录\\ExampleApp\n" +
-                    "实际目标会是 D:\\迁移目录\\ExampleApp\\Cache。原 C 盘路径会指向这个目标。");
+                    "目标位置选 D:\\迁移目录\\ExampleApp，程序会补成 D:\\迁移目录\\ExampleApp\\Cache。" +
+                    "也可以直接填完整目标，确认迁移后程序会创建缺少的目录。");
                 AddHelp(text, bold, "迁移前",
                     "完全退出相关软件，包括它的托盘和后台进程。先挑一个明确属于该软件的缓存或配置子目录，避免整搬用户目录、AppData 或安装目录。" +
-                    "目标盘须为长期连接的固定 NTFS 盘，留足空间。目标父目录下须留出源目录的同名位置。");
+                    "目标盘须为长期连接的固定 NTFS 盘，留足空间。已经有内容的目标目录需要另选位置。");
                 AddHelp(text, bold, "Program Files 和 Program Files (x86)",
                     "扫描只把能与单个系统安装登记对应的目录列为可预检，并排除共享组件以及登记的服务和驱动。" +
                     "迁移选中目录时，只需选择目标盘。安装目录会放到该盘带有访问权限保护的 DiskDelta-ProgramFiles 下。" +
@@ -920,7 +945,19 @@ namespace DiskDelta
             text.AccessibleName = label;
             text.Dock = DockStyle.None;
             text.Anchor = AnchorStyles.Left | AnchorStyles.Right;
-            var row = (TableLayoutPanel)WithLabel(label, text);
+            Button help = null;
+            if (text == destination)
+            {
+                help = MaintenanceView.Action("?");
+                help.AutoSize = false;
+                help.MinimumSize = Size.Empty;
+                help.Size = new Size(18, 20);
+                help.Margin = new Padding(2, 4, 0, 0);
+                help.AccessibleName = "目标位置说明";
+                tips.SetToolTip(help, "目标位置说明");
+                help.Click += delegate { ShowDestinationHelp(); };
+            }
+            var row = (TableLayoutPanel)WithLabel(label, text, help);
             row.ColumnCount = 3;
             row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 86));
             row.Controls.Add(browse, 2, 0);
@@ -928,21 +965,84 @@ namespace DiskDelta
             {
                 using (var picker = new FolderBrowserDialog
                 {
-                    Description = label, SelectedPath = Directory.Exists(text.Text) ? text.Text : initial,
+                    Description = label, SelectedPath = ExistingFolder(text.Text, initial),
                     ShowNewFolderButton = text == destination
                 })
-                    if (picker.ShowDialog(this) == DialogResult.OK) text.Text = picker.SelectedPath;
+                    if (picker.ShowDialog(this) == DialogResult.OK)
+                    {
+                        if (text == destination) ApplyDestination(picker.SelectedPath);
+                        else text.Text = picker.SelectedPath;
+                    }
             };
             return row;
         }
 
-        private static Control WithLabel(string label, Control field)
+        private static string ExistingFolder(string value, string fallback)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return fallback;
+            try
+            {
+                for (string path = PrivateFiles.FullPath(value.Trim()); path != null; path = Path.GetDirectoryName(path))
+                    if (Directory.Exists(path)) return path;
+            }
+            catch (IOException) { }
+            catch (ArgumentException) { }
+            catch (NotSupportedException) { }
+            return fallback;
+        }
+
+        private void ApplyDestination(string selection)
+        {
+            selectedDestination = selection;
+            string next = selection;
+            try
+            {
+                next = PrivateFiles.FullPath(selection);
+                if (!string.IsNullOrWhiteSpace(source.Text))
+                {
+                    string from = PrivateFiles.FullPath(source.Text.Trim());
+                    next = InstalledFolders.IsAppFolder(from) ? InstalledMigration.TargetPath(from, Path.GetPathRoot(next)) :
+                        FolderMigration.ResolveTarget(from, next);
+                }
+            }
+            catch (IOException) { }
+            catch (ArgumentException) { }
+            catch (NotSupportedException) { }
+            WriteDestination(next);
+        }
+
+        private void WriteDestination(string value)
+        {
+            writingDestination = true;
+            try { destination.Text = value; }
+            finally { writingDestination = false; }
+        }
+
+        private void ShowDestinationHelp()
+        {
+            MessageBox.Show(this,
+                "目标位置显示实际迁移到哪里。源目录是 .vscode 时，选择 D:\\soft_system\\Microsoft VS Code，" +
+                "会自动补成 D:\\soft_system\\Microsoft VS Code\\.vscode。路径已以 .vscode 结尾时直接使用。\n\n" +
+                "确认迁移后会创建缺少的目录。空目标目录可以复用，已有文件的目录需要另选。\n\n" +
+                "迁移 Program Files 安装目录时只需选择目标盘，程序会使用该盘的 DiskDelta-ProgramFiles 专用目录。",
+                "目标位置说明", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private static Control WithLabel(string label, Control field, Control addon = null)
         {
             var row = new TableLayoutPanel { ColumnCount = 2, RowCount = 1, Dock = DockStyle.Fill, Margin = Padding.Empty };
-            row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 88));
+            row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
             row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             row.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            row.Controls.Add(MaintenanceView.Note(label), 0, 0);
+            var caption = MaintenanceView.Note(label);
+            if (addon == null) row.Controls.Add(caption, 0, 0);
+            else
+            {
+                caption.AutoSize = true;
+                caption.Dock = DockStyle.None;
+                caption.Margin = new Padding(3, 6, 0, 0);
+                row.Controls.Add(MaintenanceView.Actions(caption, addon), 0, 0);
+            }
             row.Controls.Add(field, 1, 0);
             return row;
         }
@@ -985,22 +1085,24 @@ namespace DiskDelta
                     string target = InstalledMigration.Target(normalized, disk);
                     var known = options.Find(item => string.Equals(item.Source, normalized, StringComparison.OrdinalIgnoreCase));
                     if (known != null && !known.CanUse) throw new IOException(known.Status);
+                    WriteDestination(target);
                     if (!ConfirmInstalled(normalized, target)) return;
                     await Run(null, "正在等待管理员授权及安装目录迁移…",
-                        () => InstalledMigration.Start("move", normalized, disk.Substring(0, 2)));
+                        log => InstalledMigration.Start("move", normalized, log, disk.Substring(0, 2)));
                     return;
                 }
                 var record = service.Preview(source.Text.Trim(), destination.Text.Trim());
+                WriteDestination(record.Target);
                 if (!MaintenanceView.Confirm(this, "请确认相关软件已关闭。\n\n原路径：" + record.Source +
                     "\n目标路径：" + record.Target + "\n\n程序会复制并校验文件，保留原盘备份，然后在原路径建立目录联接。",
                     "确认迁移目录")) return;
-                await Run(record, "正在复制、校验和建立联接…", () =>
+                await Run(record, "正在复制、校验和建立联接…", log =>
                 {
-                    service.Move(record);
+                    service.Move(record, log);
                     return "迁移完成。请打开原软件验证，再决定是否释放 C 盘备份。";
                 });
             }
-            catch (Exception ex) { status.Text = ex.Message; tips.SetToolTip(status, ex.Message); }
+            catch (Exception ex) { status.Text = ex.Message; tips.SetToolTip(status, ex.Message); AppendLog(ex.Message); }
         }
 
         private bool ConfirmInstalled(string from, string to)
@@ -1046,10 +1148,10 @@ namespace DiskDelta
             var record = records.SelectedItem as MigrationRecord;
             if (record == null || !MaintenanceView.Confirm(this, "关闭相关软件后，把原始备份恢复到 C 盘？\n目标盘中的现有数据会保留。",
                 "确认恢复原目录")) return;
-            await Run(record, "正在恢复原目录…", () =>
+            await Run(record, "正在恢复原目录…", log =>
             {
-                if (record.Installed) return InstalledMigration.Start("restore", record.Id);
-                service.Restore(record);
+                if (record.Installed) return InstalledMigration.Start("restore", record.Id, log);
+                service.Restore(record, log);
                 return "原目录已恢复，目标盘副本已保留。";
             });
         }
@@ -1060,26 +1162,42 @@ namespace DiskDelta
             if (record == null || !MaintenanceView.Confirm(this,
                 "请确认软件在新位置运行正常，且现在已关闭。\n\n将校验目标中的每个备份文件，校验通过后永久删除 C 盘备份。\n\n" +
                 record.Backup, "确认释放原盘备份")) return;
-            await Run(record, "正在核对目标文件，再释放已验证的备份…", () =>
+            await Run(record, "正在核对目标文件，再释放已验证的备份…", log =>
             {
-                if (record.Installed) return InstalledMigration.Start("release", record.Id);
-                var result = service.ReleaseBackup(record);
+                if (record.Installed) return InstalledMigration.Start("release", record.Id, log);
+                var result = service.ReleaseBackup(record, log);
                 return "已删除 " + result.Deleted.ToString("N0") + " 个备份文件 · " + Dashboard.Bytes(result.Bytes) +
                     "（逻辑大小） · 跳过 " + result.Skipped.ToString("N0") + " 个";
             });
         }
 
-        private async Task Run(MigrationRecord record, string message, Func<string> action)
+        private void AppendLog(string text)
+        {
+            if (IsDisposed) return;
+            migrationLog.AppendText(DateTime.Now.ToString("HH:mm:ss") + "  " + text + Environment.NewLine);
+        }
+
+        private async Task Run(MigrationRecord record, string message, Func<Action<string>, string> action)
         {
             busy = true;
             move.Enabled = records.Enabled = source.Enabled = destination.Enabled = restore.Enabled = release.Enabled = scan.Enabled = false;
             status.Text = message;
+            migrationLog.Clear();
+            AppendLog(message);
+            IProgress<string> progress = new Progress<string>(AppendLog);
             try
             {
-                string result = await Task.Run(action);
-                if (!IsDisposed) status.Text = result;
+                string result = await Task.Run(() => action(progress.Report));
+                if (!IsDisposed) { status.Text = result; AppendLog(result); }
             }
-            catch (Exception ex) { if (!IsDisposed) status.Text = "操作中断 · " + ex.Message; }
+            catch (Exception ex)
+            {
+                if (!IsDisposed)
+                {
+                    status.Text = "操作中断 · " + ex.Message;
+                    AppendLog(status.Text);
+                }
+            }
             finally
             {
                 if (!IsDisposed)

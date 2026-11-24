@@ -42,21 +42,54 @@ namespace DiskDelta
             journal = installed ? InstalledMigration.Journal : Path.Combine(dataDirectory, "Migrations");
         }
 
-        public MigrationRecord Preview(string source, string destinationFolder)
+        public static string ResolveTarget(string source, string destination)
+        {
+            string name = Path.GetFileName(PrivateFiles.FullPath(source));
+            destination = PrivateFiles.FullPath(destination);
+            return string.Equals(Path.GetFileName(destination), name, StringComparison.OrdinalIgnoreCase)
+                ? destination : Path.Combine(destination, name);
+        }
+
+        public MigrationRecord Preview(string source, string destination)
         {
             source = ValidateSource(source);
-            string destination = PrivateFiles.FullPath(destinationFolder);
-            RequireNtfs(destination);
-            if (string.Equals(Path.GetPathRoot(destination), Program.DefaultRoot, StringComparison.OrdinalIgnoreCase) ||
-                Volume.ReadId(Path.GetPathRoot(destination)) == Volume.ReadId(Program.DefaultRoot))
-                throw new IOException("请选择 C 盘以外的固定 NTFS 磁盘。");
-            PrivateFiles.VerifyDirectory(destination);
             PrivateFiles.VerifyDirectory(source);
-            string target = Path.Combine(destination, Path.GetFileName(source));
-            if (PrivateFiles.Exists(target)) throw new IOException("目标同名路径已存在：" + target);
+            string target = ResolveTarget(source, destination);
             var record = new MigrationRecord { Id = Guid.NewGuid().ToString("N"), Source = source, Target = target, Installed = installed };
             ValidateRecord(record);
+            CheckDestination(record, false, null);
             return record;
+        }
+
+        private static void CheckDestination(MigrationRecord item, bool createParents, Action<string> log)
+        {
+            string root = Path.GetPathRoot(item.Target);
+            RequireNtfs(root);
+            if (root == Program.DefaultRoot || Volume.ReadId(root) == Volume.ReadId(Program.DefaultRoot))
+                throw new IOException("请选择 C 盘以外的固定 NTFS 磁盘。");
+            string parent = Path.GetDirectoryName(item.Target);
+            string current = root;
+            PrivateFiles.VerifyDirectory(current);
+            foreach (string name in parent.Substring(root.Length).Split(new[] { '\\' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                current = Path.Combine(current, name);
+                if (!PrivateFiles.Exists(current))
+                {
+                    if (item.Installed) throw new IOException("受保护的目标目录不可用：" + current);
+                    if (!createParents) return;
+                    WriteLog(log, "Windows API 创建目录 " + current);
+                    PrivateFiles.CreateDirectory(current);
+                }
+                PrivateFiles.VerifyDirectory(current);
+            }
+            if (PrivateFiles.Exists(item.Target))
+            {
+                if (item.Installed || (File.GetAttributes(item.Target) & FileAttributes.Directory) == 0)
+                    throw new IOException("目标位置已被占用，请选择其他位置。" + Environment.NewLine + item.Target);
+                PrivateFiles.VerifyDirectory(item.Target);
+                if (Directory.EnumerateFileSystemEntries(item.Target).Any())
+                    throw new IOException("目标目录已有内容，请选择其他位置。" + Environment.NewLine + item.Target);
+            }
         }
 
         public List<MigrationRecord> Load()
@@ -81,36 +114,51 @@ namespace DiskDelta
             return result;
         }
 
-        public void Move(MigrationRecord item)
+        public void Move(MigrationRecord item, Action<string> log = null)
         {
             ValidateRecord(item);
             RequireNtfs(item.Target);
             using (Lock())
             {
+                WriteLog(log, "检查源目录 " + item.Source);
                 var tree = ReadTree(item.Source);
                 if (installed && tree.Any(entry => !entry.Value && entry.Key.EndsWith(".sys", StringComparison.OrdinalIgnoreCase)))
                     throw new IOException("安装目录包含驱动文件，已停止迁移。");
                 if (installed && tree.Where(entry => !entry.Value).Sum(entry => new FileInfo(Path.Combine(item.Source, entry.Key)).Length) >
                     new DriveInfo(Path.GetPathRoot(item.Target)).AvailableFreeSpace)
                     throw new IOException("目标盘空间不足。");
-                PrivateFiles.VerifyDirectory(Path.GetDirectoryName(item.Target));
-                if (PrivateFiles.Exists(item.Target))
-                    throw new IOException("目标同名路径已存在：" + item.Target);
+                CheckDestination(item, true, log);
+                WriteLog(log, "写入迁移记录，创建临时目录 " + item.Staging);
                 Save(item);
                 PrivateFiles.CreateDirectory(item.Staging);
                 var acl = Directory.GetAccessControl(item.Source, AccessControlSections.Access);
                 acl.SetAccessRuleProtection(true, true);
                 Directory.SetAccessControl(item.Staging, acl);
-                Copy(item.Source, item.Staging);
+                Copy(item.Source, item.Staging, log);
 
                 PrivateFiles.VerifyDirectory(item.Source);
                 PrivateFiles.VerifyDirectory(item.Staging);
                 if (installed) InstalledMigration.RequireStopped(item.Source, item.Target);
+                WriteLog(log, "备份源目录 " + item.Backup);
                 Directory.Move(item.Source, item.Backup);
+                string emptyTarget = item.Staging + ".empty";
+                bool reservedEmpty = false;
                 try
                 {
-                    VerifyCopy(item.Backup, item.Staging, false);
+                    VerifyCopy(item.Backup, item.Staging, false, log);
+                    CheckDestination(item, false, log);
+                    if (PrivateFiles.Exists(item.Target))
+                    {
+                        WriteLog(log, "复用空目标目录 " + item.Target);
+                        Directory.Move(item.Target, emptyTarget);
+                        reservedEmpty = true;
+                        PrivateFiles.VerifyDirectory(emptyTarget);
+                        if (Directory.EnumerateFileSystemEntries(emptyTarget).Any())
+                            throw new IOException("目标目录已有新文件，请选择其他位置。");
+                    }
+                    WriteLog(log, "写入最终目标 " + item.Target);
                     Directory.Move(item.Staging, item.Target);
+                    WriteLog(log, "Windows API 建立目录联接 " + item.Source + " → " + item.Target);
                     PrivateFiles.CreateDirectory(item.PendingLink);
                     PrivateFiles.CreateJunction(item.PendingLink, item.Target);
                     Directory.Move(item.PendingLink, item.Source);
@@ -119,16 +167,33 @@ namespace DiskDelta
                 }
                 catch
                 {
-                    if (PrivateFiles.PointsTo(item.Source, item.Target))
-                        Directory.Delete(item.Source, false);
-                    if (!PrivateFiles.Exists(item.Source))
-                        Directory.Move(item.Backup, item.Source);
+                    WriteLog(log, "迁移未完成，正在尝试恢复原目录");
+                    try
+                    {
+                        if (PrivateFiles.PointsTo(item.Source, item.Target))
+                            Directory.Delete(item.Source, false);
+                        if (!PrivateFiles.Exists(item.Source))
+                            Directory.Move(item.Backup, item.Source);
+                    }
+                    finally
+                    {
+                        if (reservedEmpty)
+                        {
+                            if (!PrivateFiles.Exists(item.Target)) Directory.Move(emptyTarget, item.Target);
+                            else WriteLog(log, "原空目录暂存在 " + emptyTarget);
+                        }
+                    }
                     throw;
+                }
+                if (reservedEmpty)
+                {
+                    RemoveEmpty(emptyTarget);
+                    if (PrivateFiles.Exists(emptyTarget)) WriteLog(log, "原目标目录保留在 " + emptyTarget);
                 }
             }
         }
 
-        public void Restore(MigrationRecord item)
+        public void Restore(MigrationRecord item, Action<string> log = null)
         {
             ValidateRecord(item);
             using (Lock())
@@ -137,10 +202,14 @@ namespace DiskDelta
                 PrivateFiles.VerifyDirectory(item.Backup);
                 bool hadLink = PrivateFiles.PointsTo(item.Source, item.Target);
                 if (hadLink)
+                {
+                    WriteLog(log, "暂时移开目录联接 " + item.Source);
                     Directory.Move(item.Source, item.PendingLink);
+                }
                 else if (PrivateFiles.Exists(item.Source))
                     throw new IOException("原路径已被占用，或联接目标有变化。两份数据已保留。");
 
+                WriteLog(log, "恢复 C 盘备份 " + item.Backup + " → " + item.Source);
                 try { Directory.Move(item.Backup, item.Source); }
                 catch
                 {
@@ -153,7 +222,7 @@ namespace DiskDelta
             }
         }
 
-        public Cleanup.Result ReleaseBackup(MigrationRecord item)
+        public Cleanup.Result ReleaseBackup(MigrationRecord item, Action<string> log = null)
         {
             ValidateRecord(item);
             RequireNtfs(item.Target);
@@ -173,7 +242,8 @@ namespace DiskDelta
                         throw new IOException("备份或目标存在无法校验的文件，已保留备份：" + entry.Key);
                     files.Add(new BackupFile { Original = path, Target = target, Before = original, Copy = destination });
                 }
-                VerifyCopy(item.Backup, item.Target, true);
+                VerifyCopy(item.Backup, item.Target, true, log);
+                WriteLog(log, "释放已验证的备份文件 " + item.Backup);
                 var result = new Cleanup.Result();
                 foreach (BackupFile file in files)
                 {
@@ -297,34 +367,60 @@ namespace DiskDelta
             return result;
         }
 
-        private static void Copy(string source, string target)
+        internal static void WriteLog(Action<string> log, string message)
+        {
+            if (log != null) log(message);
+        }
+
+        private static void Copy(string source, string target, Action<string> log)
         {
             string robocopy = Path.Combine(Environment.SystemDirectory, "robocopy.exe");
-            string arguments = "\"" + source + "\" \"" + target + "\" /E /COPY:DATS /DCOPY:DAT /SL /XJ /R:0 /W:0 /NFL /NDL /NJH /NJS /NP";
+            string arguments = "\"" + source + "\" \"" + target + "\" /E /COPY:DATS /DCOPY:DAT /SL /XJ /R:0 /W:0 /NFL /NDL /NJH /NP";
+            WriteLog(log, "命令 \"" + robocopy + "\" " + arguments);
             using (var process = Process.Start(new ProcessStartInfo(robocopy, arguments)
             {
                 UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true
             }))
             {
-                var output = process.StandardOutput.ReadToEndAsync();
-                var errors = process.StandardError.ReadToEndAsync();
+                var tail = new Queue<string>();
+                DataReceivedEventHandler read = delegate(object sender, DataReceivedEventArgs e)
+                {
+                    if (string.IsNullOrWhiteSpace(e.Data)) return;
+                    lock (tail)
+                    {
+                        tail.Enqueue(e.Data.Trim());
+                        if (tail.Count > 12) tail.Dequeue();
+                    }
+                    WriteLog(log, e.Data.Trim());
+                };
+                process.OutputDataReceived += read;
+                process.ErrorDataReceived += read;
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+                var elapsed = Stopwatch.StartNew();
+                while (!process.WaitForExit(3000))
+                    WriteLog(log, "Robocopy 正在复制 · " + (int)elapsed.Elapsed.TotalSeconds + " 秒");
                 process.WaitForExit();
+                WriteLog(log, "Robocopy 退出代码 " + process.ExitCode);
                 if (process.ExitCode >= 8)
                 {
-                    string text = (output.Result + errors.Result).Trim();
+                    string text = string.Join(Environment.NewLine, tail);
                     throw new IOException("文件复制未完成（" + process.ExitCode + "）\n" + text.Substring(0, Math.Min(text.Length, 700)));
                 }
             }
         }
 
-        private static void VerifyCopy(string source, string target, bool permitExtraTargetEntries)
+        private static void VerifyCopy(string source, string target, bool permitExtraTargetEntries, Action<string> log)
         {
+            WriteLog(log, "使用 SHA-256 校验两份目录的文件内容及数据流");
             var original = ReadTree(source);
             var copy = ReadTree(target);
             if (!permitExtraTargetEntries && original.Count != copy.Count)
                 throw new IOException("两份目录的项目数量不同，已保留原始数据。");
             using (SHA256 hash = SHA256.Create())
             {
+                int count = 0;
+                var elapsed = Stopwatch.StartNew();
                 foreach (var entry in original)
                 {
                     bool isDirectory;
@@ -342,7 +438,14 @@ namespace DiskDelta
                         using (Stream duplicate = PrivateFiles.OpenForVerification(right, stream))
                             if (input.Length != duplicate.Length || !hash.ComputeHash(input).SequenceEqual(hash.ComputeHash(duplicate)))
                                 throw new IOException("目标文件内容不同，已保留原始数据：" + entry.Key);
+                    count++;
+                    if (elapsed.ElapsedMilliseconds >= 1500)
+                    {
+                        WriteLog(log, "已校验 " + count.ToString("N0") + " 个文件");
+                        elapsed.Restart();
                     }
+                    }
+                WriteLog(log, "校验完成 · " + count.ToString("N0") + " 个文件");
                 }
             }
         }

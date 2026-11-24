@@ -578,7 +578,8 @@ namespace DiskDelta
         private readonly Button restore = MaintenanceView.Action("恢复原目录");
         private readonly Button release = MaintenanceView.Action("释放 C 盘备份");
         private readonly Button scan = MaintenanceView.Action("扫描目录", true);
-        private readonly ComboBox scope = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 119, AccessibleName = "目录类别" };
+        private readonly ComboBox scope = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 114, AccessibleName = "目录类别" };
+        private readonly TextBox nameFilter = new TextBox { Width = 166, AccessibleName = "按目录或软件名称筛选" };
         private readonly DataGridView candidates = Dashboard.Grid();
         private readonly Label catalogStatus = MaintenanceView.Note("");
         private readonly Label status = MaintenanceView.Note("");
@@ -587,7 +588,14 @@ namespace DiskDelta
         private bool busy;
         private bool scanning;
         private bool started;
+        private System.Threading.CancellationTokenSource scanStop;
         private List<MigrationOption> options = new List<MigrationOption>();
+        private readonly HashSet<string> expanded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly List<string> expandable = new List<string>();
+        private HashSet<MigrationOption> matching = new HashSet<MigrationOption>();
+        private const int SizeColumn = 1;
+        private int sortColumn = SizeColumn;
+        private SortOrder sortOrder = SortOrder.Descending;
         public bool Mutating { get { return busy; } }
         public DataGridView CatalogGrid { get { return candidates; } }
 
@@ -606,10 +614,15 @@ namespace DiskDelta
             help.AccessibleName = "目录迁移说明";
             tips.SetToolTip(help, "目录迁移说明");
             help.Click += delegate { ShowHelp(); };
-            scope.Items.AddRange(new[] { "全部目录", "用户目录", "已有链接", "安装目录" });
+            scope.Items.AddRange(new[] { "推荐目录", "用户目录", "已有链接", "安装目录", "全部目录" });
             scope.SelectedIndex = 0;
             scope.Margin = new Padding(1, 4, 7, 0);
-            page.Controls.Add(MaintenanceView.Actions(scan, scope, help), 0, 0);
+            nameFilter.Margin = new Padding(3, 4, 10, 0);
+            var filterLabel = MaintenanceView.Note("名称");
+            filterLabel.AutoSize = true;
+            filterLabel.Dock = DockStyle.None;
+            filterLabel.Margin = new Padding(3, 6, 0, 0);
+            page.Controls.Add(MaintenanceView.Actions(scan, scope, filterLabel, nameFilter, help), 0, 0);
             page.Controls.Add(candidates, 0, 1);
             page.Controls.Add(catalogStatus, 0, 2);
             ConfigureCatalog();
@@ -630,7 +643,7 @@ namespace DiskDelta
             release.Click += async delegate { await Release(); };
             records.SelectedIndexChanged += delegate { ShowRecord(); };
             Reload(null);
-            Disposed += delegate { tips.Dispose(); };
+            Disposed += delegate { if (scanStop != null) scanStop.Cancel(); tips.Dispose(); };
         }
 
         public void ActivateView()
@@ -643,23 +656,47 @@ namespace DiskDelta
         private void ConfigureCatalog()
         {
             Dashboard.Column(candidates, "名称", 174);
+            Dashboard.Column(candidates, "占用大小", 102);
+            candidates.Columns[SizeColumn].DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+            candidates.Columns[SizeColumn].HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleRight;
             Dashboard.Column(candidates, "C 盘目录", 0);
             Dashboard.Column(candidates, "链接目标", 0);
             Dashboard.Column(candidates, "状态", 168);
-            scan.Click += delegate { ScanCatalog(); };
-            scope.SelectedIndexChanged += delegate { DisplayOptions(); };
-            candidates.CellClick += delegate(object sender, DataGridViewCellEventArgs e)
+            scan.Click += delegate
             {
-                if (!busy && e.RowIndex >= 0)
+                if (scanStop == null) ScanCatalog();
+                else scanStop.Cancel();
+            };
+            scope.SelectedIndexChanged += delegate { DisplayOptions(); };
+            nameFilter.TextChanged += delegate { DisplayOptions(); };
+            candidates.CellMouseClick += delegate(object sender, DataGridViewCellMouseEventArgs e)
+            {
+                if (!busy && e.Button == MouseButtons.Left && e.RowIndex >= 0)
                 {
-                    var row = (MigrationOption)candidates.Rows[e.RowIndex].Tag;
-                    if (row.CanUse) source.Text = row.Source;
+                    var gridRow = candidates.Rows[e.RowIndex];
+                    var row = (MigrationOption)gridRow.Tag;
+                    if (e.ColumnIndex == 0 && e.X <= gridRow.Cells[0].Style.Padding.Left + Indent(18) && ToggleBranch(row)) return;
+                    if (row.CanUse && matching.Contains(row)) source.Text = row.Source;
                 }
             };
             candidates.CellDoubleClick += delegate(object sender, DataGridViewCellEventArgs e)
             {
-                if (e.RowIndex >= 0 && ((MigrationOption)candidates.Rows[e.RowIndex].Tag).Linked)
-                    PathAction(item => ExplorerLocation.OpenFolder(item.Source));
+                if (e.RowIndex < 0) return;
+                var item = (MigrationOption)candidates.Rows[e.RowIndex].Tag;
+                if (item.Linked) PathAction(entry => ExplorerLocation.OpenFolder(entry.Source));
+            };
+            candidates.KeyDown += delegate(object sender, KeyEventArgs e)
+            {
+                var item = candidates.CurrentRow == null ? null : candidates.CurrentRow.Tag as MigrationOption;
+                if (item == null || busy) return;
+                if (e.KeyCode == Keys.Right && !expanded.Contains(item.Source) && ToggleBranch(item) ||
+                    e.KeyCode == Keys.Left && expanded.Contains(item.Source) && ToggleBranch(item))
+                    e.Handled = e.SuppressKeyPress = true;
+                else if (e.KeyCode == Keys.Enter && item.CanUse && matching.Contains(item))
+                {
+                    source.Text = item.Source;
+                    e.Handled = e.SuppressKeyPress = true;
+                }
             };
             var menu = new ContextMenuStrip();
             menu.Items.Add("打开源目录", null, delegate { PathAction(item => ExplorerLocation.OpenFolder(item.Source)); });
@@ -692,41 +729,129 @@ namespace DiskDelta
         {
             if (busy || scanning) return;
             scanning = true;
-            scan.Enabled = false;
-            catalogStatus.Text = "正在扫描用户目录、安装目录和现有链接…";
+            var stop = new System.Threading.CancellationTokenSource();
+            scanStop = stop;
+            scan.Text = "取消扫描";
+            catalogStatus.Text = "正在扫描目录、链接及占用大小…";
             try
             {
-                options = await Task.Run(() => MigrationCatalog.Scan(profile, service, service.Load().Concat(installedService.Load())));
+                options = await Task.Run(() => MigrationCatalog.Scan(profile, service, service.Load().Concat(installedService.Load()), stop.Token));
+                scanning = false;
                 if (!IsDisposed) DisplayOptions();
             }
+            catch (OperationCanceledException) { if (!IsDisposed) catalogStatus.Text = "已取消扫描"; }
             catch (Exception ex) { if (!IsDisposed) catalogStatus.Text = "扫描失败 · " + ex.Message; }
-            finally { scanning = false; if (!IsDisposed) scan.Enabled = !busy; }
+            finally
+            {
+                scanning = false;
+                scanStop = null;
+                stop.Dispose();
+                if (!IsDisposed) { scan.Enabled = !busy; scan.Text = "扫描目录"; }
+            }
+        }
+
+        public void SortCatalog(int column)
+        {
+            sortOrder = Dashboard.NextSort(column, sortColumn, sortOrder, column != SizeColumn);
+            sortColumn = column;
+            DisplayOptions();
+        }
+
+        private int Indent(int width)
+        {
+            return (int)Math.Round(width * candidates.RowTemplate.Height / 25.0);
+        }
+
+        private bool ToggleBranch(MigrationOption item)
+        {
+            if (!string.IsNullOrWhiteSpace(nameFilter.Text) || !expandable.Contains(item.Source)) return false;
+            if (!expanded.Add(item.Source)) expanded.Remove(item.Source);
+            DisplayOptions();
+            return true;
         }
 
         private void DisplayOptions()
         {
+            string query = nameFilter.Text.Trim();
+            string selected = candidates.CurrentRow == null ? null : ((MigrationOption)candidates.CurrentRow.Tag).Source;
+            bool search = query.Length > 0;
+            matching = new HashSet<MigrationOption>(options.Where(item => InScope(item) && (!search || NameMatches(item, query))));
+            var visible = new HashSet<MigrationOption>(matching);
+            foreach (MigrationOption item in matching)
+                for (MigrationOption parent = item.Parent; parent != null && visible.Add(parent); parent = parent.Parent) { }
             candidates.SuspendLayout();
             try
             {
                 candidates.Rows.Clear();
-                foreach (var item in options.Where(row => scope.SelectedIndex == 0 ||
-                    (scope.SelectedIndex == 1 && !row.Installed) || (scope.SelectedIndex == 2 && row.Linked) ||
-                    (scope.SelectedIndex == 3 && row.Installed)))
-                {
-                    int index = candidates.Rows.Add(item.Name, item.Source, item.Target ?? "—", item.Status);
-                    DataGridViewRow row = candidates.Rows[index];
-                    row.Tag = item;
-                    row.Cells[1].ToolTipText = item.Source;
-                    row.Cells[2].ToolTipText = item.Target;
-                    row.Cells[3].ToolTipText = item.Status;
-                    if (item.Installed && item.CanUse)
-                        row.Cells[3].Style.ForeColor = Color.FromArgb(150, 61, 21);
-                }
+                expandable.Clear();
+                foreach (MigrationOption item in Ordered(options.Where(row => row.Parent == null && visible.Contains(row))))
+                    AddBranch(item, 0, visible, matching, search);
                 candidates.ClearSelection();
-                catalogStatus.Text = candidates.Rows.Count.ToString("N0") + " 个目录 · 已有链接 " +
-                    candidates.Rows.Cast<DataGridViewRow>().Count(row => ((MigrationOption)row.Tag).Linked).ToString("N0");
+                if (selected != null)
+                    foreach (DataGridViewRow row in candidates.Rows)
+                        if (string.Equals(((MigrationOption)row.Tag).Source, selected, StringComparison.OrdinalIgnoreCase))
+                        { candidates.CurrentCell = row.Cells[0]; row.Selected = true; break; }
+                if (!scanning) catalogStatus.Text = matching.Count.ToString("N0") + " 个匹配目录";
             }
             finally { candidates.ResumeLayout(); }
+            Dashboard.ShowSort(candidates, sortColumn, sortOrder);
+        }
+
+        private static bool NameMatches(MigrationOption item, string query)
+        {
+            for (var current = item; current != null; current = current.Parent)
+                if (current.Name.IndexOf(query, StringComparison.CurrentCultureIgnoreCase) >= 0 ||
+                    Path.GetFileName(current.Source).IndexOf(query, StringComparison.CurrentCultureIgnoreCase) >= 0)
+                    return true;
+            return false;
+        }
+
+        private bool InScope(MigrationOption item)
+        {
+            switch (scope.SelectedIndex)
+            {
+                case 0: return item.Recommended || item.Linked && !item.SystemLink && item.Target != null;
+                case 1: return !item.Installed && item.CanUse;
+                case 2: return item.Linked;
+                case 3: return item.Installed && (item.CanUse || item.Linked);
+                default: return true;
+            }
+        }
+
+        private IEnumerable<MigrationOption> Ordered(IEnumerable<MigrationOption> items)
+        {
+            var names = StringComparer.CurrentCultureIgnoreCase;
+            if (sortColumn == SizeColumn)
+                return (sortOrder == SortOrder.Ascending ? items.OrderBy(item => item.Bytes ?? long.MaxValue) :
+                    items.OrderByDescending(item => item.Bytes ?? long.MinValue)).ThenBy(item => item.Name, names);
+            Func<MigrationOption, string> key = item => sortColumn == 0 ? item.Name : sortColumn == 2 ?
+                item.Source : sortColumn == 3 ? item.Target ?? "" : item.Status;
+            return (sortOrder == SortOrder.Ascending ? items.OrderBy(key, names) : items.OrderByDescending(key, names))
+                .ThenBy(item => item.Source, StringComparer.OrdinalIgnoreCase);
+        }
+
+        private void AddBranch(MigrationOption item, int level, HashSet<MigrationOption> visible,
+            HashSet<MigrationOption> matching, bool search)
+        {
+            var children = item.Children.Where(visible.Contains).ToList();
+            bool branch = children.Count > 0;
+            bool open = branch && (search || expanded.Contains(item.Source));
+            if (branch) expandable.Add(item.Source);
+            string arrow = !branch ? "　" : open ? "▾ " : "▸ ";
+            int index = candidates.Rows.Add(arrow + item.Name, item.Bytes.HasValue ? Dashboard.Bytes(item.Bytes.Value) : "—",
+                item.Source, item.Target ?? "—", matching.Contains(item) ? item.Status : "下级目录符合筛选");
+            DataGridViewRow row = candidates.Rows[index];
+            row.Tag = item;
+            row.Cells[0].Style.Padding = new Padding(Indent(7 + level * 14), 0, Indent(7), 0);
+            row.Cells[0].ToolTipText = item.Name;
+            row.Cells[1].ToolTipText = item.Linked ? "链接目标不计入 C 盘目录大小" : "文件逻辑大小 · 不含下级链接指向的数据";
+            row.Cells[2].ToolTipText = item.Source;
+            row.Cells[3].ToolTipText = item.Target;
+            row.Cells[4].ToolTipText = item.Status;
+            if (item.Installed && item.CanUse)
+                row.Cells[4].Style.ForeColor = Color.FromArgb(150, 61, 21);
+            if (open)
+                foreach (MigrationOption child in Ordered(children)) AddBranch(child, level + 1, visible, matching, search);
         }
 
         private void ShowHelp()

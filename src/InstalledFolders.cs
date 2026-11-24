@@ -63,6 +63,8 @@ namespace DiskDelta
         public string BlockReason(string path, bool requireCompleteServiceInventory = true)
         {
             if (!IsAppFolder(path)) return "系统、共享或受保护的目录";
+            if (string.Equals(Path.GetFileName(path), "Steam", StringComparison.OrdinalIgnoreCase))
+                return "请用 Steam 存储管理移动游戏";
             List<string> names;
             if (!registered.TryGetValue(path, out names)) return "缺少明确的系统安装登记";
             if (names.Count != 1 || registered.Keys.Any(item => PrivateFiles.Below(item, path) || PrivateFiles.Below(path, item)))

@@ -89,7 +89,62 @@ namespace DiskDelta
         {
             public string Key;
             public long Size;
+            public uint Attributes;
             public bool IsDirectory { get { return Key.EndsWith("\\", StringComparison.Ordinal); } }
+        }
+
+        internal sealed class DirectoryMeasure
+        {
+            public long Bytes;
+            public bool Incomplete, Links, OfflineOrEncrypted, Driver;
+
+            public void Include(DirectoryMeasure part)
+            {
+                Bytes += part.Bytes;
+                Incomplete |= part.Incomplete;
+                Links |= part.Links;
+                OfflineOrEncrypted |= part.OfflineOrEncrypted;
+                Driver |= part.Driver;
+            }
+        }
+
+        public static DirectoryMeasure MeasureDirectory(string path, IDictionary<string, DirectoryMeasure> known,
+            CancellationToken cancellation)
+        {
+            var pending = new Stack<string>();
+            pending.Push(path.TrimEnd('\\') + "\\");
+            var result = new DirectoryMeasure();
+            while (pending.Count != 0)
+            {
+                cancellation.ThrowIfCancellationRequested();
+                string directory = pending.Pop();
+                DirectoryMeasure measured;
+                if (known.TryGetValue(directory.TrimEnd('\\'), out measured))
+                {
+                    result.Include(measured);
+                    continue;
+                }
+                List<Child> children;
+                int skipped;
+                int error = ReadDirectory(directory, out children, out skipped, cancellation);
+                result.Incomplete |= error != 0;
+                result.Links |= skipped > 0;
+                foreach (Child child in children)
+                {
+                    if ((child.Attributes & (uint)(FileAttributes.Offline | FileAttributes.Encrypted)) != 0)
+                    {
+                        result.OfflineOrEncrypted = true;
+                        continue;
+                    }
+                    if (child.IsDirectory) pending.Push(directory + child.Key);
+                    else
+                    {
+                        result.Bytes += child.Size;
+                        result.Driver |= child.Key.EndsWith(".sys", StringComparison.OrdinalIgnoreCase);
+                    }
+                }
+            }
+            return result;
         }
 
         public static int Search(string root, Action<string, string, bool> visit, CancellationToken cancellation)
@@ -210,7 +265,7 @@ namespace DiskDelta
                     children.Add(new Child
                     {
                         Key = isDirectory ? entry.Name + "\\" : entry.Name,
-                        Size = ((long)entry.SizeHigh << 32) | entry.SizeLow
+                        Size = ((long)entry.SizeHigh << 32) | entry.SizeLow, Attributes = entry.Attributes
                     });
                 } while (FindNextFile(handle, out entry));
                 int error = Marshal.GetLastWin32Error();

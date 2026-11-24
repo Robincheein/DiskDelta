@@ -454,6 +454,7 @@ namespace DiskDelta
             Column(files, "当前大小", 114);
             Column(files, "文件路径", 0);
             ConfigureSorting(files, SortFiles);
+            ConfigureSorting(migration.CatalogGrid, migration.SortCatalog);
             ShowSort(files, fileSortColumn, fileSortOrder);
             files.SortCompare += CompareFileRows;
             files.CellFormatting += delegate(object sender, DataGridViewCellFormattingEventArgs e)
@@ -584,13 +585,13 @@ namespace DiskDelta
             };
         }
 
-        private static SortOrder NextSort(int column, int previous, SortOrder order, bool alphabetic)
+        internal static SortOrder NextSort(int column, int previous, SortOrder order, bool alphabetic)
         {
             if (column == previous) return order == SortOrder.Ascending ? SortOrder.Descending : SortOrder.Ascending;
             return alphabetic ? SortOrder.Ascending : SortOrder.Descending;
         }
 
-        private static void ShowSort(DataGridView grid, int column, SortOrder order)
+        internal static void ShowSort(DataGridView grid, int column, SortOrder order)
         {
             foreach (DataGridViewColumn item in grid.Columns)
                 item.HeaderCell.SortGlyphDirection = item.Index == column ? order : SortOrder.None;

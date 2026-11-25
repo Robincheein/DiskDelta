@@ -18,6 +18,7 @@ namespace DiskDelta
         [STAThread]
         private static int Main(string[] args)
         {
+            EnableLongPaths();
             if (args.Length > 0 && args[0] == "--apply-update")
                 return UpdateInstaller.Apply(typeof(Program).Assembly.Location, args);
             if (args.Length > 0 && args[0] == "--migration-admin")
@@ -26,6 +27,12 @@ namespace DiskDelta
             if (args.Length != 0 && !startup)
                 return Headless(args);
             return RunDesktop(DataPath, startup);
+        }
+
+        internal static void EnableLongPaths()
+        {
+            AppContext.SetSwitch("Switch.System.IO.UseLegacyPathHandling", false);
+            AppContext.SetSwitch("Switch.System.IO.BlockLongPaths", false);
         }
 
         internal static int RunDesktop(string dataPath, bool startup)

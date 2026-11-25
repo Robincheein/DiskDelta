@@ -58,7 +58,7 @@ namespace DiskDelta
         {
             using (SafeFileHandle handle = Open(path, ReadAttributes, 7, false))
             {
-                Info info = Inspect(handle);
+                Info info = Inspect(handle, path);
                 if ((info.Attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != FileAttributes.Directory ||
                     !MatchesPath(handle, path))
                     throw new IOException("目录包含链接、挂载点或路径已改变：" + path);
@@ -105,7 +105,7 @@ namespace DiskDelta
             SafeFileHandle handle = Open(path, GenericRead | (forDeletion ? DeleteAccess : 0), forDeletion ? 0u : 1u, false);
             try
             {
-                Info current = Inspect(handle);
+                Info current = Inspect(handle, path);
                 if ((current.Attributes & Skip) != 0 || current.Links != 1 ||
                     !expected.Matches(current) || !MatchesPath(handle, path) || !SingleStream(handle))
                     throw new IOException("文件已改变，或包含额外的数据流。");
@@ -141,6 +141,18 @@ namespace DiskDelta
             if (!MoveFileEx(source, destination, replaceExisting)) throw Error("无法保存文件", destination);
         }
 
+        public static void MoveDirectory(string source, string destination)
+        {
+            if (!MoveFileEx(Extended(source), Extended(destination), 0))
+                throw Error("无法重命名目录", source + " → " + destination);
+        }
+
+        public static int DeleteSharingError(string path)
+        {
+            using (SafeFileHandle handle = Open(path, DeleteAccess, 7, false))
+                return handle.IsInvalid ? Marshal.GetLastWin32Error() : 0;
+        }
+
         public static void CreateJunction(string emptyFolder, string target)
         {
             VerifyDirectory(emptyFolder);
@@ -166,7 +178,8 @@ namespace DiskDelta
             }
             using (SafeFileHandle handle = Open(emptyFolder, GenericWrite, 0, false))
             {
-                if (handle.IsInvalid || !MatchesPath(handle, emptyFolder)) throw Error("无法打开链接目录", emptyFolder);
+                if (handle.IsInvalid) throw Error("无法打开链接目录", emptyFolder);
+                if (!MatchesPath(handle, emptyFolder)) throw new IOException("链接目录路径已改变：" + emptyFolder);
                 uint returned;
                 if (!DeviceIoControl(handle, 0x000900a4, payload, payload.Length, IntPtr.Zero, 0, out returned, IntPtr.Zero))
                     throw Error("无法建立目录联接", emptyFolder);
@@ -223,7 +236,7 @@ namespace DiskDelta
 
         public static bool Exists(string path)
         {
-            try { File.GetAttributes(path); return true; }
+            try { File.GetAttributes(Extended(path)); return true; }
             catch (FileNotFoundException) { return false; }
             catch (DirectoryNotFoundException) { return false; }
         }
@@ -233,7 +246,7 @@ namespace DiskDelta
             SafeFileHandle handle = Open(path + (streamName == "::$DATA" ? "" : streamName), GenericRead, 1, false);
             try
             {
-                Info info = Inspect(handle);
+                Info info = Inspect(handle, path + (streamName == "::$DATA" ? "" : streamName));
                 if ((info.Attributes & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0 ||
                     !MatchesPath(handle, path, streamName))
                     throw new IOException("文件路径已改变：" + path);
@@ -257,16 +270,32 @@ namespace DiskDelta
             }
         }
 
-        private static Info Inspect(SafeFileHandle handle)
+        private static Info Inspect(SafeFileHandle handle, string path)
         {
             Info info;
-            if (handle.IsInvalid || !GetFileInformationByHandle(handle, out info)) throw Error("无法读取文件或目录", "");
+            if (handle.IsInvalid || !GetFileInformationByHandle(handle, out info)) throw Error("无法读取文件或目录", path);
             return info;
         }
 
         private static IOException Error(string operation, string path)
         {
-            return new IOException(operation + " " + path + " · " + new Win32Exception(Marshal.GetLastWin32Error()).Message);
+            return OperationError(operation, path, Marshal.GetLastWin32Error());
+        }
+
+        public static IOException OperationError(string operation, string path, int code)
+        {
+            string reason;
+            switch (code)
+            {
+                case 32: case 33: reason = "文件或目录正被占用，请关闭相关程序和后台进程后重试"; break;
+                case 5: reason = "Windows 拒绝访问，请检查此路径的权限"; break;
+                case 2: case 3: reason = "文件或目录已不存在"; break;
+                case 112: reason = "磁盘空间不足"; break;
+                case 206: reason = "路径或单级文件名超出 Windows 支持的长度"; break;
+                default: reason = new Win32Exception(code).Message; break;
+            }
+            return new IOException(operation + " · " + reason + "（Windows " + code + "）\n" + path,
+                unchecked((int)0x80070000) | code);
         }
 
         private static bool MatchesPath(SafeFileHandle handle, string path, string stream = null)
@@ -286,7 +315,7 @@ namespace DiskDelta
                 string.Equals(finalPath, expected + stream.Substring(0, stream.LastIndexOf(':')), StringComparison.OrdinalIgnoreCase));
         }
 
-        private static string Extended(string path) { return @"\\?\" + path; }
+        internal static string Extended(string path) { return @"\\?\" + path; }
 
         private static SafeFileHandle Open(string path, uint access, uint share, bool follow)
         {

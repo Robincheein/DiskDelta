@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -590,6 +591,16 @@ namespace DiskDelta
             Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, BackColor = Color.White,
             ScrollBars = ScrollBars.Vertical, AccessibleName = "实时迁移日志"
         };
+        private readonly TableLayoutPanel verificationRow = new TableLayoutPanel
+        {
+            Dock = DockStyle.Bottom, Height = 24, ColumnCount = 2, RowCount = 1, Visible = false
+        };
+        private readonly Label verificationText = MaintenanceView.Note("");
+        private readonly ProgressBar verificationBar = new ProgressBar
+        {
+            Dock = DockStyle.Fill, Style = ProgressBarStyle.Continuous, AccessibleName = "文件校验进度",
+            Margin = new Padding(5, 5, 3, 5)
+        };
         private readonly ToolTip tips = new ToolTip();
         private string selectedDestination;
         private bool writingDestination;
@@ -650,6 +661,13 @@ namespace DiskDelta
             layout.Controls.Add(status, 0, 6);
             var logGroup = new GroupBox { Text = "迁移日志", Dock = DockStyle.Fill, Padding = new Padding(6, 4, 6, 6) };
             logGroup.Controls.Add(migrationLog);
+            verificationText.AutoSize = true;
+            verificationRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            verificationRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            verificationRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            verificationRow.Controls.Add(verificationText, 0, 0);
+            verificationRow.Controls.Add(verificationBar, 1, 0);
+            logGroup.Controls.Add(verificationRow);
             page.Controls.Add(logGroup, 0, 4);
             page.SizeChanged += delegate
             {
@@ -1170,7 +1188,33 @@ namespace DiskDelta
         private void AppendLog(string text)
         {
             if (IsDisposed) return;
+            if (text.StartsWith(FolderMigration.VerificationProgressPrefix, StringComparison.Ordinal))
+            {
+                string[] values = text.Substring(FolderMigration.VerificationProgressPrefix.Length).Split(' ');
+                int count, total;
+                if (values.Length == 2 && int.TryParse(values[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out count) &&
+                    int.TryParse(values[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out total) &&
+                    count >= -1 && total >= -1 && (total == -1 || count <= total))
+                    UpdateVerification(count, total);
+                return;
+            }
             migrationLog.AppendText(DateTime.Now.ToString("HH:mm:ss") + "  " + text + Environment.NewLine);
+        }
+
+        private void UpdateVerification(int count, int total)
+        {
+            verificationRow.Visible = count >= 0;
+            if (count < 0) return;
+            if (total < 0)
+            {
+                verificationText.Text = "正在统计待校验文件…";
+                verificationBar.Style = ProgressBarStyle.Marquee;
+                return;
+            }
+            int percent = total == 0 ? 100 : (int)(100L * count / total);
+            verificationBar.Style = ProgressBarStyle.Continuous;
+            verificationBar.Value = percent;
+            verificationText.Text = "校验 " + percent + "%   " + count.ToString("N0") + " / " + total.ToString("N0") + " 个文件";
         }
 
         private async Task Run(MigrationRecord record, string message, Func<Action<string>, string> action)
@@ -1199,6 +1243,7 @@ namespace DiskDelta
                 if (!IsDisposed)
                 {
                     busy = false;
+                    verificationRow.Visible = false;
                     move.Enabled = records.Enabled = source.Enabled = destination.Enabled = true;
                     scan.Enabled = !scanning;
                     tips.SetToolTip(status, status.Text);

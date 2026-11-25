@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
@@ -27,6 +28,8 @@ namespace DiskDelta
 
     internal sealed class FolderMigration
     {
+        // The same line protocol carries progress through the elevated migration pipe.
+        internal const string VerificationProgressPrefix = "\u001eDiskDeltaVerify ";
         private static readonly XmlSerializer Serializer = new XmlSerializer(typeof(MigrationRecord));
         private static readonly HashSet<string> Protected = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -457,41 +460,54 @@ namespace DiskDelta
         private static void VerifyCopy(string source, string target, bool permitExtraTargetEntries, Action<string> log)
         {
             WriteLog(log, "使用 SHA-256 校验两份目录的文件内容及数据流");
-            var original = ReadTree(source);
-            var copy = ReadTree(target);
-            if (!permitExtraTargetEntries && original.Count != copy.Count)
-                throw new IOException("两份目录的项目数量不同，已保留原始数据。");
-            using (SHA256 hash = SHA256.Create())
+            ReportVerification(log, 0, -1);
+            int count = 0;
+            try
             {
-                int count = 0;
-                var elapsed = Stopwatch.StartNew();
-                foreach (var entry in original)
+                var original = ReadTree(source);
+                var copy = ReadTree(target);
+                if (!permitExtraTargetEntries && original.Count != copy.Count)
+                    throw new IOException("两份目录的项目数量不同，已保留原始数据。");
+                int total = original.Count(entry => !entry.Value);
+                ReportVerification(log, 0, total);
+                using (SHA256 hash = SHA256.Create())
                 {
-                    bool isDirectory;
-                    if (!copy.TryGetValue(entry.Key, out isDirectory) || isDirectory != entry.Value)
-                        throw new IOException("缺少对应项目：" + entry.Key);
-                    if (isDirectory) continue;
-                    string left = Path.Combine(source, entry.Key);
-                    string right = Path.Combine(target, entry.Key);
-                    var streams = PrivateFiles.Streams(left).ToArray();
-                    if (!new HashSet<string>(streams, StringComparer.Ordinal).SetEquals(PrivateFiles.Streams(right)))
-                        throw new IOException("文件数据流不同：" + entry.Key);
-                    foreach (string stream in streams)
+                    var elapsed = Stopwatch.StartNew();
+                    foreach (var entry in original)
                     {
-                        using (Stream input = PrivateFiles.OpenForVerification(left, stream))
-                        using (Stream duplicate = PrivateFiles.OpenForVerification(right, stream))
-                            if (input.Length != duplicate.Length || !hash.ComputeHash(input).SequenceEqual(hash.ComputeHash(duplicate)))
-                                throw new IOException("目标文件内容不同，已保留原始数据：" + entry.Key);
-                    count++;
-                    if (elapsed.ElapsedMilliseconds >= 1500)
-                    {
-                        WriteLog(log, "已校验 " + count.ToString("N0") + " 个文件");
-                        elapsed.Restart();
+                        bool isDirectory;
+                        if (!copy.TryGetValue(entry.Key, out isDirectory) || isDirectory != entry.Value)
+                            throw new IOException("缺少对应项目：" + entry.Key);
+                        if (isDirectory) continue;
+                        string left = Path.Combine(source, entry.Key);
+                        string right = Path.Combine(target, entry.Key);
+                        var streams = PrivateFiles.Streams(left).ToArray();
+                        if (!new HashSet<string>(streams, StringComparer.Ordinal).SetEquals(PrivateFiles.Streams(right)))
+                            throw new IOException("文件数据流不同：" + entry.Key);
+                        foreach (string stream in streams)
+                        {
+                            using (Stream input = PrivateFiles.OpenForVerification(left, stream))
+                            using (Stream duplicate = PrivateFiles.OpenForVerification(right, stream))
+                                if (input.Length != duplicate.Length || !hash.ComputeHash(input).SequenceEqual(hash.ComputeHash(duplicate)))
+                                    throw new IOException("目标文件内容不同，已保留原始数据：" + entry.Key);
+                        }
+                        count++;
+                        if (count == total || elapsed.ElapsedMilliseconds >= 150)
+                        {
+                            ReportVerification(log, count, total);
+                            elapsed.Restart();
+                        }
                     }
-                    }
-                WriteLog(log, "校验完成 · " + count.ToString("N0") + " 个文件");
                 }
             }
+            finally { ReportVerification(log, -1, 0); }
+            WriteLog(log, "校验完成 · " + count.ToString("N0") + " 个文件");
+        }
+
+        private static void ReportVerification(Action<string> log, int count, int total)
+        {
+            WriteLog(log, VerificationProgressPrefix + count.ToString(CultureInfo.InvariantCulture) + " " +
+                total.ToString(CultureInfo.InvariantCulture));
         }
     }
 }

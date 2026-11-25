@@ -74,6 +74,22 @@ namespace DiskDelta
                     info.Created <= cutoff && MatchesPath(handle, path);
         }
 
+        public static Info ReadMigrationFile(string path, bool backup)
+        {
+            using (SafeFileHandle handle = Open(path, ReadAttributes, 7, false))
+            {
+                Info info;
+                if (handle.IsInvalid || !GetFileInformationByHandle(handle, out info))
+                    throw Error(backup ? "无法读取备份文件，已保留备份" : "无法读取目标文件，已保留备份", path);
+                if ((info.Attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint |
+                    FileAttributes.Offline | FileAttributes.Encrypted)) != 0 || !MatchesPath(handle, path))
+                    throw new IOException("文件类型或路径已改变，已保留备份：" + path);
+                if (backup && ((info.Attributes & (FileAttributes.ReadOnly | FileAttributes.System)) != 0 || info.Links != 1))
+                    throw new IOException("备份文件带有只读、系统属性或其他硬链接，已保留备份：" + path);
+                return info;
+            }
+        }
+
         internal enum CleanupCheck { Ready, Protected, Unavailable }
 
         public static CleanupCheck InspectCleanup(string path, out Info info)

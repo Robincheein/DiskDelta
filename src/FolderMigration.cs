@@ -23,7 +23,36 @@ namespace DiskDelta
         [XmlIgnore] public string Backup { get { return Source + ".DiskDelta-" + Id + ".backup"; } }
         [XmlIgnore] public string PendingLink { get { return Source + ".DiskDelta-" + Id + ".link"; } }
         [XmlIgnore] public string Staging { get { return Target + ".DiskDelta-" + Id + ".staging"; } }
-        public override string ToString() { return Path.GetFileName(Source) + "   →   " + Path.GetPathRoot(Target); }
+        public override string ToString() { return Path.GetFileName(Source) + "   →   " + Target; }
+
+        internal string ReadStatus(out bool canRestore, out bool canRelease)
+        {
+            canRestore = canRelease = false;
+            try
+            {
+                bool backup = IsOrdinaryDirectory(Backup);
+                bool linked = PrivateFiles.PointsTo(Source, Target);
+                bool sourceExists = linked || PrivateFiles.Exists(Source);
+                canRestore = backup && (linked || !sourceExists);
+                if (linked)
+                {
+                    if (!IsOrdinaryDirectory(Target)) return "联接存在，目标不可用";
+                    canRelease = backup;
+                    return backup ? "联接有效，仍有 C 盘备份" : "联接有效，无 C 盘备份";
+                }
+                if (!sourceExists) return backup ? "源目录缺失，可恢复备份" : "源目录缺失";
+                return IsOrdinaryDirectory(Source) ? "源目录未联接" : "源路径与记录不一致";
+            }
+            catch (IOException) { return "路径状态暂不可读"; }
+            catch (UnauthorizedAccessException) { return "路径状态暂不可读"; }
+        }
+
+        internal static bool IsOrdinaryDirectory(string path)
+        {
+            return PrivateFiles.Exists(path) &&
+                (File.GetAttributes(PrivateFiles.Extended(path)) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) ==
+                FileAttributes.Directory;
+        }
     }
 
     internal sealed class FolderMigration
@@ -252,19 +281,13 @@ namespace DiskDelta
             {
                 if (!PrivateFiles.PointsTo(item.Source, item.Target))
                     throw new IOException("原路径的联接已改动，已保留备份。");
-                var tree = ReadTree(item.Backup);
                 var files = new List<BackupFile>();
-                foreach (var entry in tree.Where(entry => !entry.Value))
+                Dictionary<string, bool> tree = VerifyCopy(item.Backup, item.Target, true, log, (path, target) =>
                 {
-                    string path = Path.Combine(item.Backup, entry.Key);
-                    string target = Path.Combine(item.Target, entry.Key);
-                    PrivateFiles.Info original, destination;
-                    if (!PrivateFiles.TryCandidate(path, long.MaxValue, out original) ||
-                        !PrivateFiles.TryCandidate(target, long.MaxValue, out destination))
-                        throw new IOException("备份或目标存在无法校验的文件，已保留备份：" + entry.Key);
+                    var original = PrivateFiles.ReadMigrationFile(path, true);
+                    var destination = PrivateFiles.ReadMigrationFile(target, false);
                     files.Add(new BackupFile { Original = path, Target = target, Before = original, Copy = destination });
-                }
-                VerifyCopy(item.Backup, item.Target, true, log);
+                });
                 WriteLog(log, "释放已验证的备份文件 " + item.Backup);
                 var result = new Cleanup.Result();
                 foreach (BackupFile file in files)
@@ -292,8 +315,8 @@ namespace DiskDelta
             {
                 using (PrivateFiles.OpenForVerification(file.Target, "::$DATA"))
                 {
-                    PrivateFiles.Info current;
-                    return PrivateFiles.TryCandidate(file.Target, long.MaxValue, out current) && file.Copy.Matches(current) &&
+                    var current = PrivateFiles.ReadMigrationFile(file.Target, false);
+                    return file.Copy.Matches(current) &&
                         PrivateFiles.TryDelete(file.Original, file.Before);
                 }
             }
@@ -457,17 +480,26 @@ namespace DiskDelta
         [DllImport("kernel32.dll")]
         private static extern uint GetOEMCP();
 
-        private static void VerifyCopy(string source, string target, bool permitExtraTargetEntries, Action<string> log)
+        private static Dictionary<string, bool> VerifyCopy(string source, string target, bool permitExtraTargetEntries,
+            Action<string> log, Action<string, string> captureFile = null)
         {
             WriteLog(log, "使用 SHA-256 校验两份目录的文件内容及数据流");
             ReportVerification(log, 0, -1);
             int count = 0;
+            Dictionary<string, bool> original;
             try
             {
-                var original = ReadTree(source);
+                original = ReadTree(source);
                 var copy = ReadTree(target);
                 if (!permitExtraTargetEntries && original.Count != copy.Count)
                     throw new IOException("两份目录的项目数量不同，已保留原始数据。");
+                foreach (var entry in original)
+                {
+                    bool isDirectory;
+                    if (!copy.TryGetValue(entry.Key, out isDirectory) || isDirectory != entry.Value)
+                        throw new IOException("目标缺少对应" + (entry.Value ? "目录" : "文件") +
+                            "，已保留原始数据：" + Path.Combine(target, entry.Key));
+                }
                 int total = original.Count(entry => !entry.Value);
                 ReportVerification(log, 0, total);
                 using (SHA256 hash = new SHA256Cng())
@@ -477,12 +509,10 @@ namespace DiskDelta
                     var streamInfo = new byte[4096];
                     foreach (var entry in original)
                     {
-                        bool isDirectory;
-                        if (!copy.TryGetValue(entry.Key, out isDirectory) || isDirectory != entry.Value)
-                            throw new IOException("缺少对应项目：" + entry.Key);
-                        if (isDirectory) continue;
+                        if (entry.Value) continue;
                         string left = Path.Combine(source, entry.Key);
                         string right = Path.Combine(target, entry.Key);
+                        if (captureFile != null) captureFile(left, right);
                         const string mainStream = "::$DATA";
                         string[] streams;
                         using (var input = PrivateFiles.OpenForVerification(left, mainStream))
@@ -509,6 +539,7 @@ namespace DiskDelta
             }
             finally { ReportVerification(log, -1, 0); }
             WriteLog(log, "校验完成 · " + count.ToString("N0") + " 个文件");
+            return original;
         }
 
         private static void VerifyStream(Stream input, Stream copy, HashAlgorithm hash, byte[] buffer, string path)

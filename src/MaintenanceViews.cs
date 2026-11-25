@@ -623,7 +623,7 @@ namespace DiskDelta
             profile = profileDirectory;
             service = new FolderMigration(profileDirectory, dataDirectory);
             installedService = new FolderMigration(profileDirectory, dataDirectory, true);
-            var page = MaintenanceView.Layout(34, 0, 25, 233, 104);
+            var page = MaintenanceView.Layout(34, 0, 25, 251, 104);
             Controls.Add(page);
             var help = MaintenanceView.Action("?");
             help.AutoSize = false;
@@ -645,7 +645,7 @@ namespace DiskDelta
             page.Controls.Add(candidates, 0, 1);
             page.Controls.Add(catalogStatus, 0, 2);
             ConfigureCatalog();
-            var layout = MaintenanceView.Layout(32, 32, 35, 32, 34, 44, 0);
+            var layout = MaintenanceView.Layout(32, 32, 35, 32, 34, 62, 0);
             page.Controls.Add(layout, 0, 3);
             layout.Controls.Add(PathInput("C 盘源目录", source, profileDirectory), 0, 0);
             layout.Controls.Add(PathInput("目标位置", destination, ""), 0, 1);
@@ -675,7 +675,7 @@ namespace DiskDelta
                 int minimum = 48 * baseline / 25;
                 int maximum = 104 * baseline / 25;
                 page.RowStyles[4].Height = Math.Max(minimum, Math.Min(maximum,
-                    page.ClientSize.Height - (34 + 25 + 233 + 82) * baseline / 25));
+                    page.ClientSize.Height - (34 + 25 + 251 + 82) * baseline / 25));
             };
             move.Click += async delegate { await Migrate(); };
             restore.Click += async delegate { await Restore(); };
@@ -1077,13 +1077,25 @@ namespace DiskDelta
         private void ShowRecord()
         {
             var record = records.SelectedItem as MigrationRecord;
-            bool backup = record != null && Directory.Exists(record.Backup);
-            restore.Enabled = release.Enabled = !busy && backup;
-            if (record == null)
-                paths.Text = "暂无迁移记录";
-            else
-                paths.Text = "源：" + record.Source + "\n目标：" + record.Target + "\n原盘备份：" + (backup ? record.Backup : "无");
-            tips.SetToolTip(paths, paths.Text + (record != null && Directory.Exists(record.Staging) ? "\n暂存：" + record.Staging : ""));
+            bool canRestore = false, canRelease = false;
+            string details = "暂无迁移记录";
+            string staging = "";
+            if (record != null)
+            {
+                string state = record.ReadStatus(out canRestore, out canRelease);
+                details = "状态：" + state + "\n源：" + record.Source + "\n目标：" + record.Target;
+                try
+                {
+                    details += "\n原盘备份：" + (MigrationRecord.IsOrdinaryDirectory(record.Backup) ? record.Backup : "无");
+                    if (MigrationRecord.IsOrdinaryDirectory(record.Staging)) staging = "\n暂存：" + record.Staging;
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+            restore.Enabled = !busy && canRestore;
+            release.Enabled = !busy && canRelease;
+            paths.Text = details;
+            tips.SetToolTip(paths, details + staging);
         }
 
         private async Task Migrate()

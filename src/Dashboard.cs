@@ -26,6 +26,9 @@ namespace DiskDelta
         private const int DpiChangedMessage = 0x02e0;
 
         private readonly string dataPath;
+        private readonly DataStorage storage;
+        private bool editingSettings;
+        public string NextDataPath { get; private set; }
         private readonly GitHubUpdates updates;
         private History history;
         private Volume volume;
@@ -84,10 +87,11 @@ namespace DiskDelta
         private int fileSortColumn = 1;
         private SortOrder fileSortOrder = SortOrder.Descending;
 
-        public Dashboard(string dataPath)
+        public Dashboard(string dataPath, DataStorage storage = null)
         {
             SuspendLayout();
             this.dataPath = dataPath;
+            this.storage = storage ?? DataStorage.ForCurrentUser();
             palette = ChangePalette.Read(dataPath);
             updates = new GitHubUpdates(dataPath, typeof(Program).Assembly.Location);
             cleanup = new CleanupView(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), dataPath)
@@ -255,18 +259,34 @@ namespace DiskDelta
 
         private void EditSettings()
         {
-            using (var dialog = new SettingsWindow(Font, dataPath, typeof(Program).Assembly.Location,
-                drives.Items.Cast<Volume>(), volume, tray.Visible, SetTray, updates, CanInstallUpdate,
-                palette, ApplyPalette))
+            if (editingSettings) return;
+            editingSettings = true;
+            bool wasRefreshing = refresh.Enabled;
+            refresh.Stop();
+            try
             {
-                if (dialog.ShowDialog(this) == DialogResult.Retry)
+                using (var dialog = new SettingsWindow(Font, dataPath, typeof(Program).Assembly.Location,
+                    drives.Items.Cast<Volume>(), volume, tray.Visible, SetTray, updates, CanInstallUpdate,
+                    palette, ApplyPalette, storage, CanMoveData))
                 {
-                    leaving = true;
-                    Close();
-                    return;
+                    var choice = dialog.ShowDialog(this);
+                    if (choice == DialogResult.Retry || dialog.MovedDataPath != null)
+                    {
+                        NextDataPath = dialog.MovedDataPath;
+                        leaving = true;
+                        Close();
+                        return;
+                    }
                 }
+                if (history != null) UpdateStatus();
             }
-            if (history != null) UpdateStatus();
+            finally { editingSettings = false; if (wasRefreshing && !IsDisposed && !leaving) refresh.Start(); }
+        }
+
+        private bool CanMoveData()
+        {
+            return scanning == null && !cleanup.Working && !migration.Mutating && !software.Busy &&
+                !timeline.Working && rebuildPending == null;
         }
 
         private void ApplyPalette(ChangePalette colors)
@@ -703,7 +723,7 @@ namespace DiskDelta
 
         private async void CheckLegacyTree()
         {
-            if (comparison != null || !legacyTree || !Visible || selected == null) return;
+            if (editingSettings || comparison != null || !legacyTree || !Visible || selected == null) return;
             var requested = selected;
             var store = history;
             if (rebuildPending != null || !rebuildAttempted.Add(requested.Id)) return;

@@ -57,7 +57,8 @@ namespace DiskDelta
         {
             source = ValidateSource(source);
             PrivateFiles.VerifyDirectory(source);
-            string target = ResolveTarget(source, destination);
+            string target = PrivateFiles.FullPath(destination);
+            if (target.Length == 3) throw new IOException("请填写目标盘内的文件夹路径。");
             var record = new MigrationRecord { Id = Guid.NewGuid().ToString("N"), Source = source, Target = target, Installed = installed };
             ValidateRecord(record);
             CheckDestination(record, false, null);
@@ -332,10 +333,10 @@ namespace DiskDelta
             Guid id;
             if (item == null || item.Installed != installed || !Guid.TryParseExact(item.Id, "N", out id) ||
                 ValidateSource(item.Source) != item.Source || PrivateFiles.FullPath(item.Target) != item.Target ||
+                item.Target.Length == 3 ||
                 Path.GetPathRoot(item.Target) == Program.DefaultRoot ||
                 (installed && !string.Equals(InstalledMigration.TargetPath(item.Source, Path.GetPathRoot(item.Target)),
-                    item.Target, StringComparison.OrdinalIgnoreCase)) ||
-                !string.Equals(Path.GetFileName(item.Source), Path.GetFileName(item.Target), StringComparison.OrdinalIgnoreCase))
+                    item.Target, StringComparison.OrdinalIgnoreCase)))
                 throw new IOException("无法校验迁移记录路径。");
         }
 

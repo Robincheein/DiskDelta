@@ -22,6 +22,7 @@ namespace DiskDelta
         private bool fillsRows;
         private bool followsLatest = true;
         private bool working;
+        public bool Working { get { return working; } }
 
         public HistoryView()
         {

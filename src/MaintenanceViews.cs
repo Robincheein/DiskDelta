@@ -95,6 +95,7 @@ namespace DiskDelta
         private bool started;
         private CleanupSnapshot snapshot;
         public bool Mutating { get; private set; }
+        public bool Working { get { return busy; } }
 
         public CleanupView(string localAppData, string dataPath)
         {
@@ -640,11 +641,6 @@ namespace DiskDelta
             tips.SetToolTip(destination, "完成迁移后文件所在的路径");
             source.TextChanged += delegate { if (selectedDestination != null) ApplyDestination(selectedDestination); };
             destination.TextChanged += delegate { if (!writingDestination) selectedDestination = null; };
-            destination.Validated += delegate
-            {
-                if (selectedDestination == null && !string.IsNullOrWhiteSpace(destination.Text))
-                    ApplyDestination(destination.Text.Trim());
-            };
             layout.Controls.Add(MaintenanceView.Actions(move), 0, 2);
             layout.Controls.Add(WithLabel("迁移记录", records), 0, 3);
             layout.Controls.Add(MaintenanceView.Actions(restore, release), 0, 4);
@@ -1021,8 +1017,8 @@ namespace DiskDelta
         private void ShowDestinationHelp()
         {
             MessageBox.Show(this,
-                "目标位置显示实际迁移到哪里。源目录是 .vscode 时，选择 D:\\soft_system\\Microsoft VS Code，" +
-                "会自动补成 D:\\soft_system\\Microsoft VS Code\\.vscode。路径已以 .vscode 结尾时直接使用。\n\n" +
+                "目标位置显示实际迁移到哪里。源目录是 .vscode 时，选择 D:\\Microsoft VS Code，" +
+                "会自动补成 D:\\Microsoft VS Code\\.vscode。也可手动输入完整目标，使用不同的末级名称。\n\n" +
                 "确认迁移后会创建缺少的目录。空目标目录可以复用，已有文件的目录需要另选。\n\n" +
                 "迁移 Program Files 安装目录时只需选择目标盘，程序会使用该盘的 DiskDelta-ProgramFiles 专用目录。",
                 "目标位置说明", MessageBoxButtons.OK, MessageBoxIcon.Information);

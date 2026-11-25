@@ -146,7 +146,8 @@ namespace DiskDelta
             log("管理员子进程已启动");
             string action = args[1];
             RequireProtected(InstalledFolders.Roots[0]);
-            var service = new FolderMigration(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), Program.DataPath, true);
+            string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var service = new FolderMigration(profile, profile, true);
             if (action == "move" && count == 4)
             {
                 string source = PrivateFiles.FullPath(args[2]);

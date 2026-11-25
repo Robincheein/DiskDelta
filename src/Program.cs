@@ -10,11 +10,6 @@ namespace DiskDelta
     internal static class Program
     {
         internal const string DefaultRoot = @"C:\";
-        internal static string DataPath
-        {
-            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DiskDelta"); }
-        }
-
         [STAThread]
         private static int Main(string[] args)
         {
@@ -26,7 +21,7 @@ namespace DiskDelta
             bool startup = args.Length == 1 && args[0] == "--startup";
             if (args.Length != 0 && !startup)
                 return Headless(args);
-            return RunDesktop(DataPath, startup);
+            return RunDesktop(null, startup);
         }
 
         internal static void EnableLongPaths()
@@ -51,7 +46,15 @@ namespace DiskDelta
                     if (!startup) activate.Set();
                     return 0;
                 }
-                using (var window = new Dashboard(dataPath))
+                var storage = DataStorage.ForCurrentUser();
+                try { if (dataPath == null) dataPath = storage.Resolve(); }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message, "无法读取数据位置", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return 1;
+                }
+                while (dataPath != null)
+                using (var window = new Dashboard(dataPath, storage))
                 using (var context = new ApplicationContext(startup && window.TrayEnabled ? null : window))
                 {
                     if (context.MainForm == null)
@@ -66,6 +69,8 @@ namespace DiskDelta
                     }, null, Timeout.Infinite, false);
                     try { Application.Run(context); }
                     finally { listener.Unregister(null); }
+                    dataPath = window.NextDataPath;
+                    startup = false;
                 }
             }
             return 0;
@@ -81,6 +86,7 @@ namespace DiskDelta
                 return 2;
 
             History history = null;
+            FileStream storageLock = null;
             try
             {
                 if (scheduled && DateTime.Now.TimeOfDay < time) return 0;
@@ -99,7 +105,13 @@ namespace DiskDelta
                     }
                 }
                 if (!custom && volumeId == null) volumeId = Volume.ReadId(root);
-                history = custom ? new History(args[2]) : History.ForDrive(DataPath, root, volumeId);
+                if (custom) history = new History(args[2]);
+                else
+                {
+                    string path;
+                    storageLock = DataStorage.ForCurrentUser().OpenScan(out path);
+                    history = History.ForDrive(path, root, volumeId);
+                }
                 history.Scan(root, scheduled ? (TimeSpan?)time : null, null, CancellationToken.None, volumeId);
                 if (scheduled) history.ClearScheduledError();
                 return 0;
@@ -115,6 +127,7 @@ namespace DiskDelta
                 catch (UnauthorizedAccessException) { }
                 return 1;
             }
+            finally { if (storageLock != null) storageLock.Dispose(); }
         }
 
         private static bool IsVolumeId(string value)

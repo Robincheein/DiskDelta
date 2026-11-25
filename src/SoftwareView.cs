@@ -23,6 +23,7 @@ namespace DiskDelta
         private CancellationTokenSource cancellation;
         private bool started;
         private bool reading;
+        public bool Busy { get { return reading || cancellation != null; } }
         private SoftwareCatalog.Result snapshot;
 
         public SoftwareView(string dataPath)

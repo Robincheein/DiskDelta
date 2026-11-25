@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
 using System.Linq;
+using System.IO;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -34,11 +35,13 @@ namespace DiskDelta
         private bool updatingGeneral;
         private bool planReady;
         private bool saving;
+        private bool movingData;
+        public string MovedDataPath { get; private set; }
         private int planRequest;
 
         public SettingsWindow(Font font, string dataPath, string executable, IEnumerable<Volume> volumes,
             Volume currentDisk, bool trayEnabled, Action<bool> setTray, GitHubUpdates updates, Func<bool> canInstall,
-            ChangePalette palette, Action<ChangePalette> setPalette)
+            ChangePalette palette, Action<ChangePalette> setPalette, DataStorage storage, Func<bool> canMoveData)
         {
             this.dataPath = dataPath;
             this.executable = executable;
@@ -46,7 +49,7 @@ namespace DiskDelta
             Text = "设置";
             Font = font;
             BackColor = Color.White;
-            ClientSize = new Size(465, 524);
+            ClientSize = new Size(482, 600);
             AutoScroll = true;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition = FormStartPosition.CenterParent;
@@ -55,9 +58,9 @@ namespace DiskDelta
             AutoScaleDimensions = new SizeF(96, 96);
             AutoScaleMode = AutoScaleMode.Dpi;
 
-            var layout = MaintenanceView.Layout(110, 146, 79, 143, 46);
+            var layout = MaintenanceView.Layout(110, 76, 146, 79, 143, 46);
             layout.Dock = DockStyle.Top;
-            layout.Height = 524;
+            layout.Height = 600;
             layout.Padding = new Padding(13, 7, 13, 8);
             Controls.Add(layout);
             var generalLayout = MaintenanceView.Layout(25, 25, 29);
@@ -66,6 +69,55 @@ namespace DiskDelta
             generalLayout.Controls.Add(autoStart, 0, 1);
             generalLayout.Controls.Add(StatusRow(generalStatus, rebind), 0, 2);
             layout.Controls.Add(Section("常规", generalLayout), 0, 0);
+
+            var dataLayout = MaintenanceView.Layout(32, 25);
+            var shownPath = new TextBox { Text = dataPath, ReadOnly = true, Dock = DockStyle.Fill, AccessibleName = "当前数据目录" };
+            var browse = MaintenanceView.Action("更改目录…");
+            var dataLine = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty };
+            dataLine.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            dataLine.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            dataLine.Controls.Add(shownPath, 0, 0);
+            dataLine.Controls.Add(browse, 1, 0);
+            var dataStatus = MaintenanceView.Note(storage.Notice ?? "");
+            dataStatus.AutoEllipsis = true;
+            dataLayout.Controls.Add(dataLine, 0, 0);
+            dataLayout.Controls.Add(dataStatus, 0, 1);
+            layout.Controls.Add(Section("数据存放位置", dataLayout), 0, 1);
+            browse.Click += async delegate
+            {
+                if (saving || update.Busy || !canMoveData())
+                {
+                    dataStatus.Text = "请等当前扫描或操作完成后再更改。";
+                    return;
+                }
+                using (var picker = new FolderBrowserDialog
+                    { SelectedPath = Directory.Exists(dataPath) ? dataPath : "", Description = "选择空的数据目录，可新建文件夹" })
+                {
+                    if (picker.ShowDialog(this) != DialogResult.OK ||
+                        string.Equals(picker.SelectedPath.TrimEnd('\\'), dataPath.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) return;
+                    string destination = picker.SelectedPath;
+                    if (!MaintenanceView.Confirm(this, "迁移磁盘日记的本地数据到以下位置并重新打开主界面？\n\n" + destination,
+                        "更改数据目录")) return;
+                    movingData = true;
+                    layout.Enabled = false;
+                    dataStatus.Text = "正在复制和核对历史数据…";
+                    try
+                    {
+                        MovedDataPath = await Task.Run(() => storage.Move(dataPath, destination));
+                        if (!IsDisposed)
+                        {
+                            if (storage.Notice != null) MessageBox.Show(this, storage.Notice, "数据存放位置");
+                            DialogResult = DialogResult.OK;
+                            Close();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        if (!IsDisposed) MessageBox.Show(this, ex.Message, "更改数据目录失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+                    finally { movingData = false; if (!IsDisposed) layout.Enabled = true; }
+                }
+            };
 
             var scheduleLayout = MaintenanceView.Layout(33, 36, 39);
             scheduleLayout.Controls.Add(MaintenanceView.Actions(new Label
@@ -76,28 +128,28 @@ namespace DiskDelta
             time.Margin = new Padding(0, 3, 4, 0);
             scheduleLayout.Controls.Add(MaintenanceView.Actions(daily, time), 0, 1);
             scheduleLayout.Controls.Add(StatusRow(planStatus, save), 0, 2);
-            layout.Controls.Add(Section("扫描计划", scheduleLayout), 0, 1);
+            layout.Controls.Add(Section("扫描计划", scheduleLayout), 0, 2);
 
             this.palette = palette;
             var appearance = MaintenanceView.Layout(34, 20);
             var resetColors = MaintenanceView.Action("恢复默认");
             appearance.Controls.Add(MaintenanceView.Actions(increaseColor, decreaseColor, resetColors), 0, 0);
             appearance.Controls.Add(colorStatus, 0, 1);
-            layout.Controls.Add(Section("变化颜色", appearance), 0, 2);
+            layout.Controls.Add(Section("变化颜色", appearance), 0, 3);
             PreviewPalette();
             increaseColor.Click += delegate { PickColor(true, setPalette); };
             decreaseColor.Click += delegate { PickColor(false, setPalette); };
             resetColors.Click += delegate { ChangeColors(ChangePalette.Default, setPalette); };
 
             update = new UpdateView(updates, executable, () => !saving && canInstall());
-            layout.Controls.Add(Section("版本更新", update), 0, 3);
+            layout.Controls.Add(Section("版本更新", update), 0, 4);
             update.InstallReady += delegate { DialogResult = DialogResult.Retry; Close(); };
 
             var close = MaintenanceView.Action("关闭");
             close.DialogResult = DialogResult.Cancel;
             close.Anchor = AnchorStyles.Right | AnchorStyles.Top;
             CancelButton = close;
-            layout.Controls.Add(close, 0, 4);
+            layout.Controls.Add(close, 0, 5);
 
             tray.Checked = trayEnabled;
             tray.CheckedChanged += delegate { ChangeGeneral(tray, setTray); };
@@ -117,7 +169,7 @@ namespace DiskDelta
             save.Click += async delegate { await SavePlan(); };
             FormClosing += delegate(object sender, FormClosingEventArgs e)
             {
-                if ((saving || update.Busy) && e.CloseReason == CloseReason.UserClosing) e.Cancel = true;
+                if ((saving || update.Busy || (movingData && MovedDataPath == null)) && e.CloseReason == CloseReason.UserClosing) e.Cancel = true;
             };
             ResumeLayout(true);
         }

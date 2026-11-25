@@ -255,6 +255,26 @@ namespace DiskDelta
             catch { handle.Dispose(); throw; }
         }
 
+        public static string[] VerificationStreams(FileStream file, string path, byte[] buffer)
+        {
+            if (GetFileInformationByHandleEx(file.SafeFileHandle, 7, buffer, (uint)buffer.Length))
+            {
+                var names = new List<string>();
+                int offset = 0;
+                while (offset <= buffer.Length - 24)
+                {
+                    int next = BitConverter.ToInt32(buffer, offset);
+                    int length = BitConverter.ToInt32(buffer, offset + 4);
+                    if (length <= 0 || (length & 1) != 0 || length > buffer.Length - offset - 24) break;
+                    names.Add(Encoding.Unicode.GetString(buffer, offset + 24, length));
+                    if (next == 0) return names.ToArray();
+                    if (next < 24 + length || next > buffer.Length - offset) break;
+                    offset += next;
+                }
+            }
+            return new List<string>(Streams(path)).ToArray();
+        }
+
         public static IEnumerable<string> Streams(string path)
         {
             StreamInfo stream;

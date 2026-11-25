@@ -470,9 +470,11 @@ namespace DiskDelta
                     throw new IOException("两份目录的项目数量不同，已保留原始数据。");
                 int total = original.Count(entry => !entry.Value);
                 ReportVerification(log, 0, total);
-                using (SHA256 hash = SHA256.Create())
+                using (SHA256 hash = new SHA256Cng())
                 {
                     var elapsed = Stopwatch.StartNew();
+                    var hashBuffer = new byte[128 * 1024];
+                    var streamInfo = new byte[4096];
                     foreach (var entry in original)
                     {
                         bool isDirectory;
@@ -481,16 +483,21 @@ namespace DiskDelta
                         if (isDirectory) continue;
                         string left = Path.Combine(source, entry.Key);
                         string right = Path.Combine(target, entry.Key);
-                        var streams = PrivateFiles.Streams(left).ToArray();
-                        if (!new HashSet<string>(streams, StringComparer.Ordinal).SetEquals(PrivateFiles.Streams(right)))
-                            throw new IOException("文件数据流不同：" + entry.Key);
-                        foreach (string stream in streams)
+                        const string mainStream = "::$DATA";
+                        string[] streams;
+                        using (var input = PrivateFiles.OpenForVerification(left, mainStream))
+                        using (var duplicate = PrivateFiles.OpenForVerification(right, mainStream))
                         {
-                            using (Stream input = PrivateFiles.OpenForVerification(left, stream))
-                            using (Stream duplicate = PrivateFiles.OpenForVerification(right, stream))
-                                if (input.Length != duplicate.Length || !hash.ComputeHash(input).SequenceEqual(hash.ComputeHash(duplicate)))
-                                    throw new IOException("目标文件内容不同，已保留原始数据：" + entry.Key);
+                            streams = PrivateFiles.VerificationStreams(input, left, streamInfo);
+                            if (!new HashSet<string>(streams, StringComparer.Ordinal).SetEquals(
+                                PrivateFiles.VerificationStreams(duplicate, right, streamInfo)))
+                                throw new IOException("文件数据流不同：" + entry.Key);
+                            VerifyStream(input, duplicate, hash, hashBuffer, entry.Key);
                         }
+                        foreach (string stream in streams.Where(name => name != mainStream))
+                            using (var input = PrivateFiles.OpenForVerification(left, stream))
+                            using (var duplicate = PrivateFiles.OpenForVerification(right, stream))
+                                VerifyStream(input, duplicate, hash, hashBuffer, entry.Key + stream);
                         count++;
                         if (count == total || elapsed.ElapsedMilliseconds >= 150)
                         {
@@ -502,6 +509,22 @@ namespace DiskDelta
             }
             finally { ReportVerification(log, -1, 0); }
             WriteLog(log, "校验完成 · " + count.ToString("N0") + " 个文件");
+        }
+
+        private static void VerifyStream(Stream input, Stream copy, HashAlgorithm hash, byte[] buffer, string path)
+        {
+            if (input.Length != copy.Length || !Digest(input, hash, buffer).SequenceEqual(Digest(copy, hash, buffer)))
+                throw new IOException("目标文件内容不同，已保留原始数据：" + path);
+        }
+
+        private static byte[] Digest(Stream stream, HashAlgorithm hash, byte[] buffer)
+        {
+            hash.Initialize();
+            int read;
+            while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+                hash.TransformBlock(buffer, 0, read, null, 0);
+            hash.TransformFinalBlock(buffer, 0, 0);
+            return hash.Hash;
         }
 
         private static void ReportVerification(Action<string> log, int count, int total)

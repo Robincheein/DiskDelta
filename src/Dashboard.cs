@@ -44,7 +44,7 @@ namespace DiskDelta
         private TableLayoutPanel header;
         private TableLayoutPanel cards;
         private readonly Metric disk = new Metric("磁盘可用", true);
-        private readonly Metric change = new Metric("磁盘占用净变化", false);
+        private readonly Metric change = new Metric("扫描文件净变化", false);
         private readonly Metric visible = new Metric("文件增长合计", false);
         private readonly Panel results = new Panel { BackColor = Color.White, Dock = DockStyle.Fill };
         private readonly DataGridView files = Grid();
@@ -295,7 +295,7 @@ namespace DiskDelta
             Report report = comparison == null ? selected : comparison.Report;
             if (report != null && report.Baseline != default(DateTime))
             {
-                change.ValueColor = ChangeColor(OccupancyChange(report));
+                change.ValueColor = ChangeColor(report.Net);
                 visible.ValueColor = ChangeColor(report.Growth);
             }
             folders.Invalidate();
@@ -831,7 +831,9 @@ namespace DiskDelta
             if (hasBaseline)
             {
                 long physicalChange = OccupancyChange(report);
-                change.Set(Signed(physicalChange), volume.Letter + " 占用", ChangeColor(physicalChange));
+                change.Set(Signed(report.Net), "磁盘实际占用 " + Signed(physicalChange), ChangeColor(report.Net));
+                tips.SetToolTip(change, "目录树统计已扫描文件的逻辑大小。磁盘实际占用按卷容量和可用空间计算。\n两种统计的差额 " +
+                    Signed(physicalChange - report.Net));
                 visible.Set(Bytes(report.Growth), string.Format("新增 {0:N0} · 增大 {1:N0}", report.Added, report.Expanded),
                     ChangeColor(report.Growth));
                 tips.SetToolTip(visible, "文件逻辑大小净变化 " + Signed(report.Net));
@@ -842,6 +844,7 @@ namespace DiskDelta
             {
                 change.Set("—", "等待第二次快照");
                 visible.Set("—", "等待第二次快照");
+                tips.SetToolTip(change, null);
                 tips.SetToolTip(visible, null);
             }
             ApplyFileSort();

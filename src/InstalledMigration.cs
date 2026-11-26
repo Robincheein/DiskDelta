@@ -166,7 +166,7 @@ namespace DiskDelta
 
             Guid id;
             if (count != 3 || !Guid.TryParseExact(args[2], "N", out id) ||
-                (action != "restore" && action != "release" && action != "archive")) return 2;
+                (action != "restore" && action != "release" && action != "archive" && action != "discard")) return 2;
             RequireProtected(Journal);
             var record = service.Load().Find(item => item.Id == args[2]);
             if (record == null) throw new IOException("找不到受保护的迁移记录。");
@@ -177,7 +177,10 @@ namespace DiskDelta
             else
             {
                 RequireTarget(record.Target);
-                var released = action == "archive" ? service.ArchiveBackup(record, log) : service.ReleaseBackup(record, log);
+                Cleanup.Result released;
+                if (action == "archive") released = service.ArchiveBackup(record, log);
+                else if (action == "discard") released = service.DeleteBackup(record, log);
+                else released = service.ReleaseBackup(record, log);
                 if (released.Skipped > 0 || PrivateFiles.Exists(record.Backup))
                     throw new IOException("仍有 " + released.Skipped + " 个备份文件未释放。");
             }

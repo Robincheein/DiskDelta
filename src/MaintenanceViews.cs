@@ -580,6 +580,7 @@ namespace DiskDelta
         private readonly Button restore = MaintenanceView.Action("恢复原目录");
         private readonly Button release = MaintenanceView.Action("释放 C 盘备份");
         private readonly Button archive = MaintenanceView.Action("转存备份并释放 C 盘");
+        private readonly Button deleteBackup = MaintenanceView.Action("直接删除 C 盘备份");
         private readonly Button scan = MaintenanceView.Action("扫描目录", true);
         private readonly ComboBox scope = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 114, AccessibleName = "目录类别" };
         private readonly TextBox nameFilter = new TextBox { Width = 166, AccessibleName = "按目录或软件名称筛选" };
@@ -655,7 +656,7 @@ namespace DiskDelta
             destination.TextChanged += delegate { if (!writingDestination) selectedDestination = null; };
             layout.Controls.Add(MaintenanceView.Actions(move), 0, 2);
             layout.Controls.Add(WithLabel("迁移记录", records), 0, 3);
-            layout.Controls.Add(MaintenanceView.Actions(restore, release, archive), 0, 4);
+            layout.Controls.Add(MaintenanceView.Actions(restore, release, archive, deleteBackup), 0, 4);
             paths.AutoEllipsis = true;
             layout.Controls.Add(paths, 0, 5);
             status.AutoEllipsis = true;
@@ -682,6 +683,7 @@ namespace DiskDelta
             restore.Click += async delegate { await Restore(); };
             release.Click += async delegate { await Release(); };
             archive.Click += async delegate { await Archive(); };
+            deleteBackup.Click += async delegate { await DeleteBackup(); };
             records.SelectedIndexChanged += delegate { ShowRecord(); };
             Reload(null);
             Disposed += delegate { if (scanStop != null) scanStop.Cancel(); tips.Dispose(); };
@@ -1099,7 +1101,7 @@ namespace DiskDelta
                 catch (UnauthorizedAccessException) { }
             }
             restore.Enabled = !busy && canRestore;
-            release.Enabled = archive.Enabled = !busy && canRelease;
+            release.Enabled = archive.Enabled = deleteBackup.Enabled = !busy && canRelease;
             paths.Text = details;
             tips.SetToolTip(paths, details + staging);
         }
@@ -1223,6 +1225,21 @@ namespace DiskDelta
         private void AppendLog(string text)
         {
             if (IsDisposed) return;
+            if (text.StartsWith(FolderMigration.CopyProgressPrefix, StringComparison.Ordinal))
+            {
+                int seconds;
+                if (int.TryParse(text.Substring(FolderMigration.CopyProgressPrefix.Length), NumberStyles.Integer,
+                    CultureInfo.InvariantCulture, out seconds))
+                {
+                    verificationRow.Visible = seconds >= 0;
+                    if (seconds >= 0)
+                    {
+                        verificationBar.Style = ProgressBarStyle.Marquee;
+                        verificationText.Text = "正在复制 · 已用 " + seconds.ToString("N0") + " 秒";
+                    }
+                }
+                return;
+            }
             if (text.StartsWith(FolderMigration.VerificationProgressPrefix, StringComparison.Ordinal))
             {
                 string[] values = text.Substring(FolderMigration.VerificationProgressPrefix.Length).Split(' ');
@@ -1234,6 +1251,21 @@ namespace DiskDelta
                 return;
             }
             migrationLog.AppendText(DateTime.Now.ToString("HH:mm:ss") + "  " + text + Environment.NewLine);
+        }
+
+        private async Task DeleteBackup()
+        {
+            var record = records.SelectedItem as MigrationRecord;
+            if (record == null || !MaintenanceView.Confirm(this,
+                "确认软件在目标位置运行正常后，可永久删除以下 C 盘备份。备份独有的旧文件也会删除，之后无法用此备份恢复。\n\n" +
+                record.Backup + "\n\n正在使用的目标目录：" + record.Target, "确认永久删除 C 盘备份")) return;
+            await Run(record, "正在删除 C 盘备份…", log =>
+            {
+                if (record.Installed) return InstalledMigration.Start("discard", record.Id, log);
+                var result = service.DeleteBackup(record, log);
+                return "已删除 " + result.Deleted.ToString("N0") + " 个备份文件 · " + Dashboard.Bytes(result.Bytes) +
+                    "（逻辑大小）" + (PrivateFiles.Exists(record.Backup) ? " · 仍有内容未释放，跳过 " + result.Skipped.ToString("N0") + " 个文件" : "");
+            });
         }
 
         private void UpdateVerification(int count, int total)
@@ -1256,7 +1288,7 @@ namespace DiskDelta
         {
             busy = true;
             move.Enabled = records.Enabled = source.Enabled = destination.Enabled = restore.Enabled = release.Enabled =
-                archive.Enabled = scan.Enabled = false;
+                archive.Enabled = deleteBackup.Enabled = scan.Enabled = false;
             status.Text = message;
             migrationLog.Clear();
             AppendLog(message);

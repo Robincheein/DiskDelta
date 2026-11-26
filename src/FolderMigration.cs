@@ -60,6 +60,7 @@ namespace DiskDelta
     {
         // The same line protocol carries progress through the elevated migration pipe.
         internal const string VerificationProgressPrefix = "\u001eDiskDeltaVerify ";
+        internal const string CopyProgressPrefix = "\u001eDiskDeltaCopy ";
         private static readonly XmlSerializer Serializer = new XmlSerializer(typeof(MigrationRecord));
         private static readonly HashSet<string> Protected = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -282,9 +283,29 @@ namespace DiskDelta
                 try { return ReleaseVerifiedBackup(item, item.Target, null, log); }
                 catch (IOException)
                 {
-                    WriteLog(log, "如果目标因软件更新发生变化，可选择「转存备份并释放 C 盘」。");
+                    WriteLog(log, "确认现用软件正常后，可选择「直接删除 C 盘备份」，或把备份转存到目标盘。");
                     throw;
                 }
+            }
+        }
+
+        public Cleanup.Result DeleteBackup(MigrationRecord item, Action<string> log)
+        {
+            ValidateRecord(item);
+            using (Lock())
+            {
+                if (!PrivateFiles.PointsTo(item.Source, item.Target))
+                    throw new IOException("原路径的联接已改动，已保留备份。");
+                PrivateFiles.VerifyDirectory(item.Target);
+                var tree = ReadTree(item.Backup);
+                var files = tree.Where(entry => !entry.Value).Select(entry =>
+                {
+                    string path = Path.Combine(item.Backup, entry.Key);
+                    return new BackupFile { Original = path, Before = PrivateFiles.ReadMigrationFile(path, true) };
+                }).ToList();
+                WriteLog(log, "直接删除已确认的 C 盘备份 " + item.Backup);
+                return RemoveBackupFiles(item, tree, files, file =>
+                    PrivateFiles.TryDelete(file.Original, file.Before, verifiedMigration: true), log);
             }
         }
 
@@ -356,10 +377,18 @@ namespace DiskDelta
             if (!PrivateFiles.PointsTo(item.Source, item.Target))
                 throw new IOException("原路径的联接已改动，已保留备份。");
             WriteLog(log, "释放已验证的备份文件 " + item.Backup);
+            return RemoveBackupFiles(item, tree, files, TryRelease, log);
+        }
+
+        private static Cleanup.Result RemoveBackupFiles(MigrationRecord item, Dictionary<string, bool> tree,
+            List<BackupFile> files, Func<BackupFile, bool> delete, Action<string> log)
+        {
+            if (!PrivateFiles.PointsTo(item.Source, item.Target))
+                throw new IOException("原路径的联接已改动，已保留备份。");
             var result = new Cleanup.Result();
             foreach (BackupFile file in files)
             {
-                if (!TryRelease(file)) { result.Skipped++; continue; }
+                if (!delete(file)) { result.Skipped++; continue; }
                 result.Deleted++;
                 result.Bytes += file.Before.Size;
             }
@@ -495,52 +524,57 @@ namespace DiskDelta
             string arguments = "\"" + source + "\" \"" + target + "\" /E /COPY:DATS /DCOPY:DAT /SL /XJ /R:0 /W:0 /NFL /NDL /NJH /NP";
             var outputEncoding = Encoding.GetEncoding((int)GetOEMCP());
             WriteLog(log, "命令 \"" + robocopy + "\" " + arguments);
-            using (var process = Process.Start(new ProcessStartInfo(robocopy, arguments)
+            WriteLog(log, CopyProgressPrefix + "0");
+            try
             {
-                UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,
-                StandardOutputEncoding = outputEncoding, StandardErrorEncoding = outputEncoding
-            }))
-            {
-                var tail = new Queue<string>();
-                int windowsError = 0;
-                string errorLine = null;
-                var errorCodePattern = new Regex(@"\((?:0x)([0-9a-fA-F]{8})\)");
-                DataReceivedEventHandler read = delegate(object sender, DataReceivedEventArgs e)
+                using (var process = Process.Start(new ProcessStartInfo(robocopy, arguments)
                 {
-                    if (string.IsNullOrWhiteSpace(e.Data)) return;
-                    lock (tail)
+                    UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,
+                    StandardOutputEncoding = outputEncoding, StandardErrorEncoding = outputEncoding
+                }))
+                {
+                    var tail = new Queue<string>();
+                    int windowsError = 0;
+                    string errorLine = null;
+                    var errorCodePattern = new Regex(@"\((?:0x)([0-9a-fA-F]{8})\)");
+                    DataReceivedEventHandler read = delegate(object sender, DataReceivedEventArgs e)
                     {
-                        tail.Enqueue(e.Data.Trim());
-                        if (tail.Count > 12) tail.Dequeue();
-                        if (windowsError == 0)
+                        if (string.IsNullOrWhiteSpace(e.Data)) return;
+                        lock (tail)
                         {
-                            Match error = errorCodePattern.Match(e.Data);
-                            if (error.Success)
+                            tail.Enqueue(e.Data.Trim());
+                            if (tail.Count > 12) tail.Dequeue();
+                            if (windowsError == 0)
                             {
-                                windowsError = Convert.ToInt32(error.Groups[1].Value, 16);
-                                errorLine = e.Data.Trim();
+                                Match error = errorCodePattern.Match(e.Data);
+                                if (error.Success)
+                                {
+                                    windowsError = Convert.ToInt32(error.Groups[1].Value, 16);
+                                    errorLine = e.Data.Trim();
+                                }
                             }
                         }
+                        WriteLog(log, e.Data.Trim());
+                    };
+                    process.OutputDataReceived += read;
+                    process.ErrorDataReceived += read;
+                    process.BeginOutputReadLine();
+                    process.BeginErrorReadLine();
+                    var elapsed = Stopwatch.StartNew();
+                    while (!process.WaitForExit(1000))
+                        WriteLog(log, CopyProgressPrefix + ((int)elapsed.Elapsed.TotalSeconds).ToString(CultureInfo.InvariantCulture));
+                    process.WaitForExit();
+                    WriteLog(log, "Robocopy 退出代码 " + process.ExitCode);
+                    if (process.ExitCode >= 8)
+                    {
+                        string step = "Robocopy 复制失败（退出代码 " + process.ExitCode + "）";
+                        if (windowsError != 0) throw PrivateFiles.OperationError(step, errorLine, windowsError);
+                        string text = string.Join(Environment.NewLine, tail);
+                        throw new IOException(step + "\n" + source + " → " + target + "\n" + text);
                     }
-                    WriteLog(log, e.Data.Trim());
-                };
-                process.OutputDataReceived += read;
-                process.ErrorDataReceived += read;
-                process.BeginOutputReadLine();
-                process.BeginErrorReadLine();
-                var elapsed = Stopwatch.StartNew();
-                while (!process.WaitForExit(3000))
-                    WriteLog(log, "Robocopy 正在复制 · " + (int)elapsed.Elapsed.TotalSeconds + " 秒");
-                process.WaitForExit();
-                WriteLog(log, "Robocopy 退出代码 " + process.ExitCode);
-                if (process.ExitCode >= 8)
-                {
-                    string step = "Robocopy 复制失败（退出代码 " + process.ExitCode + "）";
-                    if (windowsError != 0) throw PrivateFiles.OperationError(step, errorLine, windowsError);
-                    string text = string.Join(Environment.NewLine, tail);
-                    throw new IOException(step + "\n" + source + " → " + target + "\n" + text);
                 }
             }
+            finally { WriteLog(log, CopyProgressPrefix + "-1"); }
         }
 
         [DllImport("kernel32.dll")]

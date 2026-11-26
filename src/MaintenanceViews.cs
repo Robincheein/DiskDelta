@@ -579,6 +579,7 @@ namespace DiskDelta
         private readonly Button move = MaintenanceView.Action("迁移并建立联接", true);
         private readonly Button restore = MaintenanceView.Action("恢复原目录");
         private readonly Button release = MaintenanceView.Action("释放 C 盘备份");
+        private readonly Button archive = MaintenanceView.Action("转存备份并释放 C 盘");
         private readonly Button scan = MaintenanceView.Action("扫描目录", true);
         private readonly ComboBox scope = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 114, AccessibleName = "目录类别" };
         private readonly TextBox nameFilter = new TextBox { Width = 166, AccessibleName = "按目录或软件名称筛选" };
@@ -654,7 +655,7 @@ namespace DiskDelta
             destination.TextChanged += delegate { if (!writingDestination) selectedDestination = null; };
             layout.Controls.Add(MaintenanceView.Actions(move), 0, 2);
             layout.Controls.Add(WithLabel("迁移记录", records), 0, 3);
-            layout.Controls.Add(MaintenanceView.Actions(restore, release), 0, 4);
+            layout.Controls.Add(MaintenanceView.Actions(restore, release, archive), 0, 4);
             paths.AutoEllipsis = true;
             layout.Controls.Add(paths, 0, 5);
             status.AutoEllipsis = true;
@@ -680,6 +681,7 @@ namespace DiskDelta
             move.Click += async delegate { await Migrate(); };
             restore.Click += async delegate { await Restore(); };
             release.Click += async delegate { await Release(); };
+            archive.Click += async delegate { await Archive(); };
             records.SelectedIndexChanged += delegate { ShowRecord(); };
             Reload(null);
             Disposed += delegate { if (scanStop != null) scanStop.Cancel(); tips.Dispose(); };
@@ -1086,14 +1088,18 @@ namespace DiskDelta
                 details = "状态：" + state + "\n源：" + record.Source + "\n目标：" + record.Target;
                 try
                 {
-                    details += "\n原盘备份：" + (MigrationRecord.IsOrdinaryDirectory(record.Backup) ? record.Backup : "无");
-                    if (MigrationRecord.IsOrdinaryDirectory(record.Staging)) staging = "\n暂存：" + record.Staging;
+                    bool localBackup = MigrationRecord.IsOrdinaryDirectory(record.Backup);
+                    bool archived = MigrationRecord.IsOrdinaryDirectory(record.Archive);
+                    details += localBackup ? "\n原盘备份：" + record.Backup :
+                        archived ? "\n转存备份：" + record.Archive : "\n原盘备份：无";
+                    if (localBackup && archived) staging += "\n转存备份：" + record.Archive;
+                    if (MigrationRecord.IsOrdinaryDirectory(record.Staging)) staging += "\n暂存：" + record.Staging;
                 }
                 catch (IOException) { }
                 catch (UnauthorizedAccessException) { }
             }
             restore.Enabled = !busy && canRestore;
-            release.Enabled = !busy && canRelease;
+            release.Enabled = archive.Enabled = !busy && canRelease;
             paths.Text = details;
             tips.SetToolTip(paths, details + staging);
         }
@@ -1186,7 +1192,8 @@ namespace DiskDelta
         {
             var record = records.SelectedItem as MigrationRecord;
             if (record == null || !MaintenanceView.Confirm(this,
-                "请确认软件在新位置运行正常，且现在已关闭。\n\n将校验目标中的每个备份文件，校验通过后永久删除 C 盘备份。\n\n" +
+                "请确认软件在新位置运行正常，且现在已关闭。\n\n将校验目标中的每个备份文件，校验通过后永久删除 C 盘备份。" +
+                "如果软件更新后目标文件有变化，可以改用「转存备份并释放 C 盘」。\n\n" +
                 record.Backup, "确认释放原盘备份")) return;
             await Run(record, "正在核对目标文件，再释放已验证的备份…", log =>
             {
@@ -1194,6 +1201,22 @@ namespace DiskDelta
                 var result = service.ReleaseBackup(record, log);
                 return "已删除 " + result.Deleted.ToString("N0") + " 个备份文件 · " + Dashboard.Bytes(result.Bytes) +
                     "（逻辑大小） · 跳过 " + result.Skipped.ToString("N0") + " 个";
+            });
+        }
+
+        private async Task Archive()
+        {
+            var record = records.SelectedItem as MigrationRecord;
+            if (record == null || !MaintenanceView.Confirm(this,
+                "把 C 盘备份另存到以下位置，逐个校验文件后释放 C 盘备份。\n\n" + record.Archive +
+                "\n\n现有软件目录和联接会保留。", "确认转存备份")) return;
+            await Run(record, "正在向目标盘转存 C 盘备份…", log =>
+            {
+                if (record.Installed) return InstalledMigration.Start("archive", record.Id, log);
+                var result = service.ArchiveBackup(record, log);
+                if (PrivateFiles.Exists(record.Backup))
+                    return "转存已保存，C 盘备份仍有未释放的内容 · 跳过 " + result.Skipped.ToString("N0") + " 个文件";
+                return "转存完成 · 已释放 " + Dashboard.Bytes(result.Bytes) + "（文件逻辑大小）";
             });
         }
 
@@ -1232,7 +1255,8 @@ namespace DiskDelta
         private async Task Run(MigrationRecord record, string message, Func<Action<string>, string> action)
         {
             busy = true;
-            move.Enabled = records.Enabled = source.Enabled = destination.Enabled = restore.Enabled = release.Enabled = scan.Enabled = false;
+            move.Enabled = records.Enabled = source.Enabled = destination.Enabled = restore.Enabled = release.Enabled =
+                archive.Enabled = scan.Enabled = false;
             status.Text = message;
             migrationLog.Clear();
             AppendLog(message);

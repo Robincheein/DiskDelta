@@ -67,7 +67,8 @@ namespace DiskDelta
                             log("管理员子进程退出代码 " + process.ExitCode);
                             if (process.ExitCode != 0) return "安装目录操作未完成，请查看日志或迁移记录。";
                             return action == "move" ? "已建立联接，请验证软件后再决定是否释放备份。" :
-                                action == "restore" ? "已恢复原安装目录，目标盘副本已保留。" : "备份释放操作已完成。";
+                                action == "restore" ? "已恢复原安装目录，目标盘副本已保留。" :
+                                action == "archive" ? "备份已转存，C 盘备份已释放。" : "备份释放操作已完成。";
                         }
                     }
                     finally { stop.Cancel(); }
@@ -165,7 +166,7 @@ namespace DiskDelta
 
             Guid id;
             if (count != 3 || !Guid.TryParseExact(args[2], "N", out id) ||
-                (action != "restore" && action != "release")) return 2;
+                (action != "restore" && action != "release" && action != "archive")) return 2;
             RequireProtected(Journal);
             var record = service.Load().Find(item => item.Id == args[2]);
             if (record == null) throw new IOException("找不到受保护的迁移记录。");
@@ -176,8 +177,8 @@ namespace DiskDelta
             else
             {
                 RequireTarget(record.Target);
-                var released = service.ReleaseBackup(record, log);
-                if (released.Skipped > 0)
+                var released = action == "archive" ? service.ArchiveBackup(record, log) : service.ReleaseBackup(record, log);
+                if (released.Skipped > 0 || PrivateFiles.Exists(record.Backup))
                     throw new IOException("仍有 " + released.Skipped + " 个备份文件未释放。");
             }
             return 0;

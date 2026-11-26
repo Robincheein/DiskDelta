@@ -84,8 +84,8 @@ namespace DiskDelta
                 if ((info.Attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint |
                     FileAttributes.Offline | FileAttributes.Encrypted)) != 0 || !MatchesPath(handle, path))
                     throw new IOException("文件类型或路径已改变，已保留备份：" + path);
-                if (backup && ((info.Attributes & (FileAttributes.ReadOnly | FileAttributes.System)) != 0 || info.Links != 1))
-                    throw new IOException("备份文件带有只读、系统属性或其他硬链接，已保留备份：" + path);
+                if (backup && ((info.Attributes & FileAttributes.System) != 0 || info.Links != 1))
+                    throw new IOException("备份文件带有系统属性或其他硬链接，已保留备份：" + path);
                 return info;
             }
         }
@@ -104,15 +104,25 @@ namespace DiskDelta
             }
         }
 
-        public static bool TryDelete(string path, Info expected)
+        public static bool TryDelete(string path, Info expected, bool verifiedMigration = false)
         {
-            byte delete = 1;
+            FileAttributes protectedAttributes = verifiedMigration ? (Skip & ~FileAttributes.ReadOnly) | FileAttributes.Encrypted : Skip;
             using (SafeFileHandle handle = Open(path, ReadAttributes | DeleteAccess, 0, false))
             {
                 Info current;
-                return !handle.IsInvalid && GetFileInformationByHandle(handle, out current) &&
-                    (current.Attributes & Skip) == 0 && current.Links == 1 && expected.Matches(current) &&
-                    MatchesPath(handle, path) && SetFileInformationByHandle(handle, 4, ref delete, 1);
+                if (handle.IsInvalid || !GetFileInformationByHandle(handle, out current) ||
+                    (current.Attributes & protectedAttributes) != 0 || current.Links != 1 ||
+                    !expected.Matches(current) || !MatchesPath(handle, path))
+                    return false;
+                if ((current.Attributes & FileAttributes.ReadOnly) != 0)
+                {
+                    const int FileDispositionInfoEx = 21;
+                    const uint Delete = 1, IgnoreReadOnly = 0x10;
+                    uint flags = Delete | IgnoreReadOnly;
+                    return SetFileInformationByHandle(handle, FileDispositionInfoEx, ref flags, sizeof(uint));
+                }
+                byte delete = 1;
+                return SetFileInformationByHandle(handle, 4, ref delete, 1);
             }
         }
 
@@ -385,6 +395,8 @@ namespace DiskDelta
         private static extern uint GetFinalPathNameByHandleW(SafeFileHandle file, StringBuilder path, uint length, uint flags);
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool SetFileInformationByHandle(SafeFileHandle file, int kind, ref byte payload, int length);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetFileInformationByHandle(SafeFileHandle file, int kind, ref uint payload, int length);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, EntryPoint = "CreateDirectoryW", SetLastError = true)]
         private static extern bool CreateDirectoryNative(string path, IntPtr security);
         [DllImport("kernel32.dll", SetLastError = true)]

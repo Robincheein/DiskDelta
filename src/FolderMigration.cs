@@ -23,6 +23,7 @@ namespace DiskDelta
         [XmlIgnore] public string Backup { get { return Source + ".DiskDelta-" + Id + ".backup"; } }
         [XmlIgnore] public string PendingLink { get { return Source + ".DiskDelta-" + Id + ".link"; } }
         [XmlIgnore] public string Staging { get { return Target + ".DiskDelta-" + Id + ".staging"; } }
+        [XmlIgnore] public string Archive { get { return Target + ".DiskDelta-" + Id + ".backup"; } }
         public override string ToString() { return Path.GetFileName(Source) + "   →   " + Target; }
 
         internal string ReadStatus(out bool canRestore, out bool canRelease)
@@ -166,10 +167,7 @@ namespace DiskDelta
                 CheckDestination(item, true, log);
                 WriteLog(log, "写入迁移记录，创建临时目录 " + item.Staging);
                 Save(item);
-                PrivateFiles.CreateDirectory(item.Staging);
-                var acl = Directory.GetAccessControl(PrivateFiles.Extended(item.Source), AccessControlSections.Access);
-                acl.SetAccessRuleProtection(true, true);
-                Directory.SetAccessControl(PrivateFiles.Extended(item.Staging), acl);
+                CreateCopyDirectory(item.Source, item.Staging);
                 Copy(item.Source, item.Staging, log);
 
                 PrivateFiles.VerifyDirectory(item.Source);
@@ -281,26 +279,94 @@ namespace DiskDelta
             {
                 if (!PrivateFiles.PointsTo(item.Source, item.Target))
                     throw new IOException("原路径的联接已改动，已保留备份。");
-                var files = new List<BackupFile>();
-                Dictionary<string, bool> tree = VerifyCopy(item.Backup, item.Target, true, log, (path, target) =>
+                try { return ReleaseVerifiedBackup(item, item.Target, null, log); }
+                catch (IOException)
                 {
-                    var original = PrivateFiles.ReadMigrationFile(path, true);
-                    var destination = PrivateFiles.ReadMigrationFile(target, false);
-                    files.Add(new BackupFile { Original = path, Target = target, Before = original, Copy = destination });
-                });
-                WriteLog(log, "释放已验证的备份文件 " + item.Backup);
-                var result = new Cleanup.Result();
-                foreach (BackupFile file in files)
-                {
-                    if (!TryRelease(file)) { result.Skipped++; continue; }
-                    result.Deleted++;
-                    result.Bytes += file.Before.Size;
+                    WriteLog(log, "如果目标因软件更新发生变化，可选择「转存备份并释放 C 盘」。");
+                    throw;
                 }
-                foreach (var entry in tree.Where(entry => entry.Value).OrderByDescending(entry => entry.Key.Length))
-                    RemoveEmpty(Path.Combine(item.Backup, entry.Key));
-                RemoveEmpty(item.Backup);
-                return result;
             }
+        }
+
+        public Cleanup.Result ArchiveBackup(MigrationRecord item, Action<string> log = null)
+        {
+            ValidateRecord(item);
+            RequireNtfs(item.Archive);
+            using (Lock())
+            {
+                if (!PrivateFiles.PointsTo(item.Source, item.Target))
+                    throw new IOException("原路径的联接已改动，已保留备份。");
+                PrivateFiles.VerifyDirectory(item.Target);
+                PrivateFiles.VerifyDirectory(Path.GetDirectoryName(item.Archive));
+                if (Volume.ReadId(Path.GetPathRoot(item.Archive)) == Volume.ReadId(Program.DefaultRoot))
+                    throw new IOException("备份需要转存到 C 盘以外的磁盘。");
+                if (installed)
+                {
+                    InstalledMigration.RequireTarget(item.Target);
+                    if (PrivateFiles.Exists(item.Archive)) InstalledMigration.RequireTarget(item.Archive);
+                }
+                if (PrivateFiles.Exists(item.Archive))
+                {
+                    WriteLog(log, "核对已存在的转存目录 " + item.Archive);
+                    return ReleaseVerifiedBackup(item, item.Archive, null, log);
+                }
+
+                string staging = item.Archive + "." + Guid.NewGuid().ToString("N") + ".staging";
+                try
+                {
+                    ReadTree(item.Backup);
+                    WriteLog(log, "转存 C 盘备份 " + item.Backup + " → " + staging);
+                    CreateCopyDirectory(item.Backup, staging);
+                    Copy(item.Backup, staging, log);
+                    if (installed) InstalledMigration.RequireTarget(staging);
+                    return ReleaseVerifiedBackup(item, item.Archive, staging, log);
+                }
+                catch
+                {
+                    RemoveEmpty(staging);
+                    if (PrivateFiles.Exists(staging)) WriteLog(log, "本次转存暂存于 " + staging);
+                    throw;
+                }
+            }
+        }
+
+        private static void CreateCopyDirectory(string original, string copy)
+        {
+            PrivateFiles.CreateDirectory(copy);
+            var acl = Directory.GetAccessControl(PrivateFiles.Extended(original), AccessControlSections.Access);
+            acl.SetAccessRuleProtection(true, true);
+            Directory.SetAccessControl(PrivateFiles.Extended(copy), acl);
+        }
+
+        private static Cleanup.Result ReleaseVerifiedBackup(MigrationRecord item, string target, string staging, Action<string> log)
+        {
+            var files = new List<BackupFile>();
+            Dictionary<string, bool> tree = VerifyCopy(item.Backup, staging ?? target, staging == null, log, (path, copy) =>
+            {
+                var original = PrivateFiles.ReadMigrationFile(path, true);
+                var destination = PrivateFiles.ReadMigrationFile(copy, false);
+                string finalCopy = staging == null ? copy : target + copy.Substring(staging.Length);
+                files.Add(new BackupFile { Original = path, Target = finalCopy, Before = original, Copy = destination });
+            });
+            if (staging != null)
+            {
+                WriteLog(log, "保存已校验的转存备份 " + target);
+                PrivateFiles.MoveDirectory(staging, target);
+            }
+            if (!PrivateFiles.PointsTo(item.Source, item.Target))
+                throw new IOException("原路径的联接已改动，已保留备份。");
+            WriteLog(log, "释放已验证的备份文件 " + item.Backup);
+            var result = new Cleanup.Result();
+            foreach (BackupFile file in files)
+            {
+                if (!TryRelease(file)) { result.Skipped++; continue; }
+                result.Deleted++;
+                result.Bytes += file.Before.Size;
+            }
+            foreach (var entry in tree.Where(entry => entry.Value).OrderByDescending(entry => entry.Key.Length))
+                RemoveEmpty(Path.Combine(item.Backup, entry.Key));
+            RemoveEmpty(item.Backup);
+            return result;
         }
 
         private sealed class BackupFile
@@ -317,7 +383,7 @@ namespace DiskDelta
                 {
                     var current = PrivateFiles.ReadMigrationFile(file.Target, false);
                     return file.Copy.Matches(current) &&
-                        PrivateFiles.TryDelete(file.Original, file.Before);
+                        PrivateFiles.TryDelete(file.Original, file.Before, verifiedMigration: true);
                 }
             }
             catch (IOException) { return false; }
